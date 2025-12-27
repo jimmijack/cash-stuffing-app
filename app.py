@@ -155,85 +155,156 @@ except Exception as e:
 st.title("💶 Mein Cash Stuffing Planer")
 
 # --- SIDEBAR ---
-sb_tab1, sb_tab2 = st.sidebar.tabs(["📝 Neuer Eintrag", "💸 Umbuchung"])
+# Jetzt 3 Tabs
+sb_tab1, sb_tab2, sb_tab3 = st.sidebar.tabs(["📝 Einzeln", "💰 Verteiler", "💸 Umbuchung"])
 current_categories = get_categories()
 
-# TAB 1: EINTRAG
+# TAB 1: EINZEL BUCHUNG
 with sb_tab1:
     with st.form("entry_form", clear_on_submit=True):
         date_input = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
-        type_input = st.selectbox("Typ", ["SOLL (Budget einzahlen)", "IST (Ausgabe)"])
+        type_input = st.selectbox("Typ", ["IST (Ausgabe)", "SOLL (Budget einzahlen)"]) # Reihenfolge getauscht für schnelleres Eingeben von Ausgaben
         
         budget_target = None
+        # Budget Logik
         if "SOLL" in type_input:
-            st.caption("Für welchen Monat ist dieses Budget?")
+            st.caption("Ziel-Monat:")
             today = date.today()
-            this_month_str = today.strftime("%Y-%m")
-            next_month_date = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
-            next_month_str = next_month_date.strftime("%Y-%m")
-            
             this_lbl = f"{DE_MONTHS[today.month]} {today.year}"
-            next_lbl = f"{DE_MONTHS[next_month_date.month]} {next_month_date.year}"
-            
-            choice = st.radio("Zuweisung", [this_lbl, next_lbl], horizontal=True)
-            budget_target = this_month_str if choice == this_lbl else next_month_str
+            next_m = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+            next_lbl = f"{DE_MONTHS[next_m.month]} {next_m.year}"
+            choice = st.radio("M", [this_lbl, next_lbl], horizontal=True, label_visibility="collapsed")
+            budget_target = today.strftime("%Y-%m") if choice == this_lbl else next_m.strftime("%Y-%m")
         
         if not current_categories:
-            st.warning("Keine Kategorien vorhanden.")
+            st.warning("Keine Kategorien!")
             category_input = st.text_input("Kategorie")
         else:
             category_input = st.selectbox("Kategorie", current_categories)
             
-        desc_input = st.text_input("Beschreibung (Optional)")
+        desc_input = st.text_input("Info (Opt)")
         amount_input = st.number_input("Betrag (€)", min_value=0.0, format="%.2f")
         
-        submitted = st.form_submit_button("Speichern")
-        if submitted:
+        if st.form_submit_button("Speichern"):
             db_type = "SOLL" if "SOLL" in type_input else "IST"
             save_transaction(date_input, category_input, desc_input, amount_input, db_type, budget_target)
             st.success("Gespeichert!")
             st.rerun()
 
-# TAB 2: UMBUCHUNG
+# TAB 2: BULK VERTEILER (NEU!)
 with sb_tab2:
-    st.write("Verschiebe Geld zwischen Umschlägen.")
+    st.write("Verteile eine Gesamtsumme auf deine Umschläge.")
+    
+    # 1. Datum und Monat wählen
+    bulk_date = st.date_input("Datum", date.today(), format="DD.MM.YYYY", key="bulk_date")
+    
+    today = date.today()
+    this_lbl = f"{DE_MONTHS[today.month]} {today.year}"
+    next_m = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+    next_lbl = f"{DE_MONTHS[next_m.month]} {next_m.year}"
+    
+    bulk_choice = st.radio("Für Monat:", [this_lbl, next_lbl], horizontal=True, key="bulk_month_choice")
+    bulk_target_month = today.strftime("%Y-%m") if bulk_choice == this_lbl else next_m.strftime("%Y-%m")
+    
+    st.caption("Trage unten die Beträge ein. Die Summe wird live berechnet.")
+    
+    # 2. Data Editor für schnelle Eingabe
+    if "bulk_df" not in st.session_state:
+        # Initialer DataFrame
+        st.session_state.bulk_df = pd.DataFrame({
+            "Kategorie": current_categories,
+            "Betrag": [0.0] * len(current_categories)
+        })
+    else:
+        # Prüfen ob Kategorien sich geändert haben, dann updaten
+        if len(st.session_state.bulk_df) != len(current_categories):
+             st.session_state.bulk_df = pd.DataFrame({
+                "Kategorie": current_categories,
+                "Betrag": [0.0] * len(current_categories)
+            })
+
+    # Konfiguration für Editor
+    col_cfg = {
+        "Kategorie": st.column_config.TextColumn("Kategorie", disabled=True),
+        "Betrag": st.column_config.NumberColumn("Betrag (€)", min_value=0, format="%.2f €")
+    }
+    
+    edited_bulk = st.data_editor(
+        st.session_state.bulk_df, 
+        column_config=col_cfg, 
+        hide_index=True, 
+        use_container_width=True,
+        key="bulk_editor",
+        num_rows="fixed"
+    )
+    
+    # 3. Live Summe
+    total_bulk = edited_bulk["Betrag"].sum()
+    st.metric("Gesamtsumme", format_euro(total_bulk))
+    
+    # 4. Speichern Button
+    if st.button("Budgets buchen"):
+        if total_bulk == 0:
+            st.warning("Summe ist 0.")
+        else:
+            count = 0
+            for index, row in edited_bulk.iterrows():
+                if row["Betrag"] > 0:
+                    save_transaction(bulk_date, row["Kategorie"], "Budget Verteiler", row["Betrag"], "SOLL", bulk_target_month)
+                    count += 1
+            
+            # Reset der Tabelle nach Speichern
+            st.session_state.bulk_df = pd.DataFrame({
+                "Kategorie": current_categories,
+                "Betrag": [0.0] * len(current_categories)
+            })
+            st.success(f"{count} Budgets ({format_euro(total_bulk)}) für {bulk_choice} angelegt!")
+            st.rerun()
+
+
+# TAB 3: UMBUCHUNG
+with sb_tab3:
+    st.write("Verschiebe Geld.")
     with st.form("transfer_form", clear_on_submit=True):
         t_date = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
         if len(current_categories) >= 2:
             c1, c2 = st.columns(2)
-            cat_from = c1.selectbox("Von (Quelle)", current_categories, index=0)
+            cat_from = c1.selectbox("Von", current_categories, index=0)
             def_idx = 1
             for i, c in enumerate(current_categories):
                 if "Spar" in c or "Notgroschen" in c:
                     if c != cat_from:
                         def_idx = i
                         break
-            cat_to = c2.selectbox("Nach (Ziel)", current_categories, index=def_idx)
-            t_amt = st.number_input("Betrag (€)", min_value=0.0, format="%.2f", key="t_amt")
+            cat_to = c2.selectbox("Nach", current_categories, index=def_idx)
+            t_amt = st.number_input("Betrag", min_value=0.0, format="%.2f", key="t_amt")
             
-            t_sub = st.form_submit_button("Umbuchen")
-            if t_sub:
+            if st.form_submit_button("Umbuchen"):
                 if cat_from == cat_to:
-                    st.error("Quelle und Ziel müssen unterschiedlich sein.")
+                    st.error("Identische Kategorien.")
                 else:
                     perform_transfer(t_date, cat_from, cat_to, t_amt)
-                    st.success(f"{t_amt}€ umgebucht.")
+                    st.success("Erledigt.")
                     st.rerun()
         else:
             st.warning("Zu wenig Kategorien.")
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("⚙️ Kategorien verwalten"):
-    new_cat_name = st.text_input("Name hinzufügen", key="new_cat_input")
+    new_cat_name = st.text_input("Neu:", key="new_cat_input")
     if st.button("Hinzufügen"):
         if new_cat_name:
             if add_category_to_db(new_cat_name):
+                # Cache invalidieren für Bulk Editor
+                if "bulk_df" in st.session_state: del st.session_state.bulk_df
                 st.rerun()
     st.markdown("---")
-    del_cat_name = st.selectbox("Löschen", current_categories, key="del_cat_select") if current_categories else None
-    if st.button("Löschen"):
+    del_cat_name = st.selectbox("Löschen:", current_categories, key="del_cat_select") if current_categories else None
+    if st.button("Entfernen"):
         if del_cat_name:
             delete_category_from_db(del_cat_name)
+            # Cache invalidieren
+            if "bulk_df" in st.session_state: del st.session_state.bulk_df
             st.rerun()
 
 # --- HAUPTBEREICH ---
@@ -244,96 +315,63 @@ if df.empty:
 else:
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 Monatsübersicht", "📈 Verlauf", "📊 Trends", "⚖️ Vergleich", "📝 Editor"])
 
-    # --- TAB 1: Monatsübersicht (MIT FILTER & SUMMEN) ---
+    # --- TAB 1: Monatsübersicht ---
     with tab1:
         st.subheader("Details pro Monat")
-        
         col_sel1, col_sel2 = st.columns([1, 2])
         month_options = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
         
         if not month_options.empty:
             with col_sel1:
                 selected_month_label = st.selectbox("Monat auswählen", month_options['Analyse_Monat'].unique())
-            
             with col_sel2:
-                # NEU: Multiselect Filter
-                sel_categories = st.multiselect("Kategorien filtern", current_categories, default=current_categories, help="Wähle Kategorien ab, um die Ansicht zu fokussieren.")
+                sel_categories = st.multiselect("Filter", current_categories, default=current_categories)
             
             current_sort_key = month_options[month_options['Analyse_Monat'] == selected_month_label]['sort_key_month'].iloc[0]
             
-            # Daten filtern nach Zeit
             df_curr = df[df['sort_key_month'] == current_sort_key].copy()
             df_prev = df[df['sort_key_month'] < current_sort_key].copy()
             
-            # --- BERECHNUNG ---
-            # 1. Übertrag berechnen (auf Basis ALLER Daten vor Filter, aber später filtern wir das Ergebnis)
             prev_soll = df_prev[df_prev['type'] == 'SOLL'].groupby('category')['amount'].sum()
             prev_ist = df_prev[df_prev['type'] == 'IST'].groupby('category')['amount'].sum()
             carryover = prev_soll.subtract(prev_ist, fill_value=0)
             
-            # 2. Aktuelle Daten berechnen
             curr_soll = df_curr[df_curr['type'] == 'SOLL'].groupby('category')['amount'].sum()
             curr_ist = df_curr[df_curr['type'] == 'IST'].groupby('category')['amount'].sum()
             
-            # 3. DataFrame bauen
             overview = pd.DataFrame({
                 'Übertrag Vormonat': carryover,
                 'Budget (Neu)': curr_soll,
                 'Ausgaben (IST)': curr_ist
             }).fillna(0)
             
-            # 4. JETZT FILTERN nach Kategorie-Auswahl
-            if sel_categories:
-                # Wir filtern den Index des Overview DataFrames
-                overview = overview[overview.index.isin(sel_categories)]
-            else:
-                # Wenn user alles abwählt, zeige leere Tabelle
-                overview = overview[overview.index.isin([])]
+            if sel_categories: overview = overview[overview.index.isin(sel_categories)]
+            else: overview = overview[overview.index.isin([])]
             
             overview['Gesamt Verfügbar'] = overview['Übertrag Vormonat'] + overview['Budget (Neu)']
             overview['Rest'] = overview['Gesamt Verfügbar'] - overview['Ausgaben (IST)']
             overview['Genutzt %'] = (overview['Ausgaben (IST)'] / overview['Gesamt Verfügbar'] * 100).fillna(0)
             
-            # 5. SUMMENZEILE EINFÜGEN
             if not overview.empty:
                 sum_row = overview.sum(numeric_only=True)
-                # Prozent für Gesamt neu berechnen (Summe der Prozente wäre falsch)
-                total_used = sum_row['Ausgaben (IST)']
-                total_avail = sum_row['Gesamt Verfügbar']
+                total_used, total_avail = sum_row['Ausgaben (IST)'], sum_row['Gesamt Verfügbar']
                 sum_row['Genutzt %'] = (total_used / total_avail * 100) if total_avail > 0 else 0
-                
-                # Als DataFrame
                 sum_df = pd.DataFrame(sum_row).T
-                sum_df.index = ["∑ GESAMT"] # Name der Zeile
+                sum_df.index = ["∑ GESAMT"]
                 
-                # KPIs (basieren jetzt auf der gefilterten Summe!)
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Übertrag (Alt)", format_euro(sum_row['Übertrag Vormonat']))
                 c2.metric("Frisches Budget", format_euro(sum_row['Budget (Neu)']))
                 c3.metric("Ausgaben", format_euro(sum_row['Ausgaben (IST)']))
                 c4.metric("Aktueller Rest", format_euro(sum_row['Rest']), delta_color="normal")
                 
-                # Tabelle zusammenfügen (Daten + Summenzeile)
                 display_df = pd.concat([overview, sum_df])
-                
-                st.dataframe(
-                    display_df.style
-                    .format("{:.2f} €", subset=['Übertrag Vormonat', 'Budget (Neu)', 'Ausgaben (IST)', 'Gesamt Verfügbar', 'Rest'])
-                    .format("{:.1f} %", subset=['Genutzt %'])
-                    .bar(subset=['Genutzt %'], color='#ffbd45', vmin=0, vmax=100)
-                    .applymap(lambda v: 'color: gray', subset=['Übertrag Vormonat'])
-                    .applymap(lambda v: 'font-weight: bold; background-color: #f0f2f6', subset=pd.IndexSlice[display_df.index[-1], :]) # Summenzeile hervorheben
-                    .applymap(lambda v: 'font-weight: bold', subset=['Rest']),
-                    use_container_width=True
-                )
+                st.dataframe(display_df.style.format("{:.2f} €", subset=['Übertrag Vormonat', 'Budget (Neu)', 'Ausgaben (IST)', 'Gesamt Verfügbar', 'Rest']).format("{:.1f} %", subset=['Genutzt %']).bar(subset=['Genutzt %'], color='#ffbd45', vmin=0, vmax=100).applymap(lambda v: 'color: gray', subset=['Übertrag Vormonat']).applymap(lambda v: 'font-weight: bold; background-color: #f0f2f6', subset=pd.IndexSlice[display_df.index[-1], :]).applymap(lambda v: 'font-weight: bold', subset=['Rest']), use_container_width=True)
             else:
-                st.info("Bitte Kategorien auswählen.")
+                st.info("Kategorien wählen.")
 
-            # Einzelbuchungen Filter
-            if sel_categories:
-                df_curr_filtered = df_curr[df_curr['category'].isin(sel_categories)]
-            else:
-                df_curr_filtered = pd.DataFrame()
+            if sel_categories: df_curr_filtered = df_curr[df_curr['category'].isin(sel_categories)]
+            else: df_curr_filtered = pd.DataFrame()
                 
             with st.expander("Einzelbuchungen (Gefiltert)"):
                 st.dataframe(df_curr_filtered[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
@@ -349,7 +387,6 @@ else:
         if sel_cat != "Alle": df_c = df_c[df_c['category'] == sel_cat]
         
         x_vals, y_a, y_b, n_a, n_b = [], [], [], "", ""
-        
         if "Monate" in mode:
             opts = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
             all_m = opts['Analyse_Monat'].unique()
@@ -362,7 +399,6 @@ else:
                     return d.groupby(d['date'].dt.day)['amount'].sum().reindex(range(1, 32), fill_value=0)
                 y_a, y_b = get_d(df_c, n_a), get_d(df_c, n_b)
                 x_vals = list(range(1, 32))
-                
         elif "Jahre" in mode:
             ys = sorted(df['Jahr'].unique())
             if ys:
