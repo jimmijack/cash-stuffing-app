@@ -42,7 +42,7 @@ def init_db():
         )
     ''')
     
-    # 2. Migration: Neue Spalte 'budget_month' hinzufügen, falls sie fehlt
+    # 2. Migration: Neue Spalte 'budget_month' hinzufügen
     try:
         c.execute("SELECT budget_month FROM transactions LIMIT 1")
     except sqlite3.OperationalError:
@@ -129,7 +129,6 @@ def load_data():
 
         return df
     except Exception as e:
-        # st.error(f"Ladefehler: {e}") # Debugging ausblenden
         return pd.DataFrame()
 
 def save_transaction(dt, cat, desc, amt, typ, budget_mon=None):
@@ -245,54 +244,99 @@ if df.empty:
 else:
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 Monatsübersicht", "📈 Verlauf", "📊 Trends", "⚖️ Vergleich", "📝 Editor"])
 
-    # --- TAB 1: Monatsübersicht ---
+    # --- TAB 1: Monatsübersicht (MIT FILTER & SUMMEN) ---
     with tab1:
         st.subheader("Details pro Monat")
+        
+        col_sel1, col_sel2 = st.columns([1, 2])
         month_options = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
         
         if not month_options.empty:
-            selected_month_label = st.selectbox("Monat auswählen", month_options['Analyse_Monat'].unique())
+            with col_sel1:
+                selected_month_label = st.selectbox("Monat auswählen", month_options['Analyse_Monat'].unique())
+            
+            with col_sel2:
+                # NEU: Multiselect Filter
+                sel_categories = st.multiselect("Kategorien filtern", current_categories, default=current_categories, help="Wähle Kategorien ab, um die Ansicht zu fokussieren.")
+            
             current_sort_key = month_options[month_options['Analyse_Monat'] == selected_month_label]['sort_key_month'].iloc[0]
             
+            # Daten filtern nach Zeit
             df_curr = df[df['sort_key_month'] == current_sort_key].copy()
             df_prev = df[df['sort_key_month'] < current_sort_key].copy()
             
+            # --- BERECHNUNG ---
+            # 1. Übertrag berechnen (auf Basis ALLER Daten vor Filter, aber später filtern wir das Ergebnis)
             prev_soll = df_prev[df_prev['type'] == 'SOLL'].groupby('category')['amount'].sum()
             prev_ist = df_prev[df_prev['type'] == 'IST'].groupby('category')['amount'].sum()
             carryover = prev_soll.subtract(prev_ist, fill_value=0)
             
+            # 2. Aktuelle Daten berechnen
             curr_soll = df_curr[df_curr['type'] == 'SOLL'].groupby('category')['amount'].sum()
             curr_ist = df_curr[df_curr['type'] == 'IST'].groupby('category')['amount'].sum()
             
+            # 3. DataFrame bauen
             overview = pd.DataFrame({
                 'Übertrag Vormonat': carryover,
                 'Budget (Neu)': curr_soll,
                 'Ausgaben (IST)': curr_ist
             }).fillna(0)
             
+            # 4. JETZT FILTERN nach Kategorie-Auswahl
+            if sel_categories:
+                # Wir filtern den Index des Overview DataFrames
+                overview = overview[overview.index.isin(sel_categories)]
+            else:
+                # Wenn user alles abwählt, zeige leere Tabelle
+                overview = overview[overview.index.isin([])]
+            
             overview['Gesamt Verfügbar'] = overview['Übertrag Vormonat'] + overview['Budget (Neu)']
             overview['Rest'] = overview['Gesamt Verfügbar'] - overview['Ausgaben (IST)']
             overview['Genutzt %'] = (overview['Ausgaben (IST)'] / overview['Gesamt Verfügbar'] * 100).fillna(0)
             
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Übertrag (Alt)", format_euro(overview['Übertrag Vormonat'].sum()))
-            # KORREKTUR HIER: Klammer hinzugefügt
-            c2.metric("Frisches Budget", format_euro(overview['Budget (Neu)'].sum()))
-            c3.metric("Ausgaben", format_euro(overview['Ausgaben (IST)'].sum()))
-            c4.metric("Aktueller Rest", format_euro(overview['Rest'].sum()))
-            
-            st.dataframe(
-                overview.style
-                .format("{:.2f} €", subset=['Übertrag Vormonat', 'Budget (Neu)', 'Ausgaben (IST)', 'Gesamt Verfügbar', 'Rest'])
-                .format("{:.1f} %", subset=['Genutzt %'])
-                .bar(subset=['Genutzt %'], color='#ffbd45', vmin=0, vmax=100)
-                .applymap(lambda v: 'color: gray', subset=['Übertrag Vormonat'])
-                .applymap(lambda v: 'font-weight: bold', subset=['Rest']),
-                use_container_width=True
-            )
-            
-            with st.expander("Einzelbuchungen anzeigen"):
-                st.dataframe(df_curr[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
+            # 5. SUMMENZEILE EINFÜGEN
+            if not overview.empty:
+                sum_row = overview.sum(numeric_only=True)
+                # Prozent für Gesamt neu berechnen (Summe der Prozente wäre falsch)
+                total_used = sum_row['Ausgaben (IST)']
+                total_avail = sum_row['Gesamt Verfügbar']
+                sum_row['Genutzt %'] = (total_used / total_avail * 100) if total_avail > 0 else 0
+                
+                # Als DataFrame
+                sum_df = pd.DataFrame(sum_row).T
+                sum_df.index = ["∑ GESAMT"] # Name der Zeile
+                
+                # KPIs (basieren jetzt auf der gefilterten Summe!)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Übertrag (Alt)", format_euro(sum_row['Übertrag Vormonat']))
+                c2.metric("Frisches Budget", format_euro(sum_row['Budget (Neu)']))
+                c3.metric("Ausgaben", format_euro(sum_row['Ausgaben (IST)']))
+                c4.metric("Aktueller Rest", format_euro(sum_row['Rest']), delta_color="normal")
+                
+                # Tabelle zusammenfügen (Daten + Summenzeile)
+                display_df = pd.concat([overview, sum_df])
+                
+                st.dataframe(
+                    display_df.style
+                    .format("{:.2f} €", subset=['Übertrag Vormonat', 'Budget (Neu)', 'Ausgaben (IST)', 'Gesamt Verfügbar', 'Rest'])
+                    .format("{:.1f} %", subset=['Genutzt %'])
+                    .bar(subset=['Genutzt %'], color='#ffbd45', vmin=0, vmax=100)
+                    .applymap(lambda v: 'color: gray', subset=['Übertrag Vormonat'])
+                    .applymap(lambda v: 'font-weight: bold; background-color: #f0f2f6', subset=pd.IndexSlice[display_df.index[-1], :]) # Summenzeile hervorheben
+                    .applymap(lambda v: 'font-weight: bold', subset=['Rest']),
+                    use_container_width=True
+                )
+            else:
+                st.info("Bitte Kategorien auswählen.")
+
+            # Einzelbuchungen Filter
+            if sel_categories:
+                df_curr_filtered = df_curr[df_curr['category'].isin(sel_categories)]
+            else:
+                df_curr_filtered = pd.DataFrame()
+                
+            with st.expander("Einzelbuchungen (Gefiltert)"):
+                st.dataframe(df_curr_filtered[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
 
     # --- TAB 2: VERLAUF ---
     with tab2:
@@ -393,7 +437,6 @@ else:
     with tab5:
         st.subheader("📝 Daten korrigieren")
         df_ed = df.sort_values(by=['date', 'id'], ascending=[False, False]).copy()
-        
         col_conf = {
             "id": st.column_config.NumberColumn("ID", disabled=True),
             "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
@@ -412,47 +455,29 @@ else:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             mod = False
-            
             if chg["deleted_rows"]:
                 for idx in chg["deleted_rows"]:
-                    # Prüfen, ob der Index im DataFrame existiert
                     if idx in df_ed.index: 
-                       # Wir müssen sicherstellen, dass wir die richtige ID über den Range-Index des df_ed bekommen
-                       # df_ed ist ein Snapshot. 
-                       # Achtung: data_editor indices beziehen sich auf die Position im angezeigten Frame.
-                       # Wir holen die ID sicherheitshalber direkt über iloc
                        try:
                            row_id = df_ed.iloc[idx]['id']
                            c.execute("DELETE FROM transactions WHERE id = ?", (int(row_id),))
-                       except:
-                           pass # Index out of bounds prevention
+                       except: pass
                 mod = True
-                
             if chg["edited_rows"]:
                 for idx, row_chg in chg["edited_rows"].items():
-                    # Auch hier: iloc verwenden
                     rid = df_ed.iloc[idx]['id']
                     for k, v in row_chg.items():
                         c.execute(f"UPDATE transactions SET {k} = ? WHERE id = ?", (v, int(rid)))
                 mod = True
-                
             if chg["added_rows"]:
                 for r in chg["added_rows"]:
                     dt = r.get("date", date.today())
-                    # Formatierung des Datums beim Hinzufügen checken
-                    if isinstance(dt, str):
-                        # Falls String, versuchen zu parsen oder so lassen (SQLite frisst Strings)
-                        pass 
                     bm = r.get("budget_month", None)
-                    if not bm and isinstance(dt, (date, datetime.datetime)):
-                        bm = dt.strftime("%Y-%m")
-                    elif not bm:
-                        bm = date.today().strftime("%Y-%m")
-                        
+                    if not bm and isinstance(dt, (date, datetime.datetime)): bm = dt.strftime("%Y-%m")
+                    elif not bm: bm = date.today().strftime("%Y-%m")
                     c.execute("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?, ?, ?, ?, ?, ?)",
                               (dt, r.get("category", "Sonstiges"), r.get("description", ""), r.get("amount", 0.0), r.get("type", "IST"), bm))
                 mod = True
-            
             conn.commit()
             conn.close()
             if mod:
