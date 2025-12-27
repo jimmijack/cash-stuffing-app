@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import datetime
 from datetime import date
+import plotly.graph_objects as go # Wichtig für die neuen Charts
 
 # --- Konfiguration & Setup ---
 st.set_page_config(page_title="Cash Stuffing Planer", layout="wide", page_icon="💶")
@@ -23,14 +24,11 @@ DEFAULT_CATEGORIES = [
 ]
 
 def format_euro(val):
-    """Hilfsfunktion für deutsche Währungsformatierung"""
     return "{:,.2f} €".format(val).replace(",", "X").replace(".", ",").replace("X", ".")
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
-    # 1. Transaktions-Tabelle
     c.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,20 +39,15 @@ def init_db():
             type TEXT
         )
     ''')
-    
-    # 2. Kategorie-Tabelle
     c.execute('''
         CREATE TABLE IF NOT EXISTS categories (
             name TEXT PRIMARY KEY
         )
     ''')
-    
-    # Prüfen, ob Kategorien leer sind (Initial-Setup)
     c.execute("SELECT count(*) FROM categories")
     if c.fetchone()[0] == 0:
         for cat in DEFAULT_CATEGORIES:
             c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
-            
     conn.commit()
     conn.close()
 
@@ -72,7 +65,7 @@ def add_category_to_db(new_cat):
         conn.commit()
         success = True
     except sqlite3.IntegrityError:
-        success = False # Existiert schon
+        success = False
     conn.close()
     return success
 
@@ -91,6 +84,7 @@ def load_data():
         if not df.empty:
             df['date'] = pd.to_datetime(df['date'])
             df['Monat_Name'] = df['date'].dt.month.map(DE_MONTHS)
+            df['Monat_Num'] = df['date'].dt.month
             df['Jahr'] = df['date'].dt.year
             df['Monat_Jahr'] = df['Monat_Name'] + " " + df['Jahr'].astype(str)
             df['Quartal'] = "Q" + df['date'].dt.quarter.astype(str) + " " + df['Jahr'].astype(str)
@@ -115,23 +109,18 @@ except Exception as e:
 # --- UI START ---
 st.title("💶 Mein Cash Stuffing Planer")
 
-# --- SIDEBAR: Eingabe & Einstellungen ---
+# --- SIDEBAR ---
 st.sidebar.header("Neuer Eintrag")
-
-# Kategorien laden
 current_categories = get_categories()
 
 with st.sidebar.form("entry_form", clear_on_submit=True):
     date_input = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
     type_input = st.selectbox("Typ", ["SOLL (Budget)", "IST (Ausgabe)"])
-    
-    # Dynamisches Dropdown aus DB
     if not current_categories:
-        st.warning("Keine Kategorien vorhanden. Bitte unten anlegen!")
+        st.warning("Keine Kategorien vorhanden.")
         category_input = st.text_input("Kategorie (Fallback)")
     else:
         category_input = st.selectbox("Kategorie", current_categories)
-        
     desc_input = st.text_input("Beschreibung (Optional)")
     amount_input = st.number_input("Betrag (€)", min_value=0.0, format="%.2f")
     
@@ -143,48 +132,37 @@ with st.sidebar.form("entry_form", clear_on_submit=True):
         st.rerun()
 
 st.sidebar.markdown("---")
-
-# --- SIDEBAR: Kategorien Management ---
 with st.sidebar.expander("⚙️ Kategorien verwalten"):
-    st.write("Neue Kategorie hinzufügen:")
-    new_cat_name = st.text_input("Name der Kategorie", key="new_cat_input")
+    new_cat_name = st.text_input("Name hinzufügen", key="new_cat_input")
     if st.button("Hinzufügen"):
         if new_cat_name:
             if add_category_to_db(new_cat_name):
-                st.success(f"'{new_cat_name}' hinzugefügt!")
                 st.rerun()
-            else:
-                st.error("Existiert bereits.")
     
     st.markdown("---")
-    st.write("Kategorie löschen:")
-    del_cat_name = st.selectbox("Löschen auswählen", current_categories, key="del_cat_select")
+    del_cat_name = st.selectbox("Löschen", current_categories, key="del_cat_select") if current_categories else None
     if st.button("Löschen"):
         if del_cat_name:
             delete_category_from_db(del_cat_name)
-            st.warning(f"'{del_cat_name}' gelöscht!")
             st.rerun()
 
 # --- HAUPTBEREICH ---
 df = load_data()
 
 if df.empty:
-    st.info("Willkommen! Noch keine Daten vorhanden. Bitte links Einträge hinzufügen.")
+    st.info("Bitte erstelle erste Einträge in der Sidebar.")
 else:
-    tab1, tab2, tab3 = st.tabs(["📅 Monatsübersicht", "📊 Trends & Verlauf", "⚖️ Vergleichsrechner"])
+    # Reiter Definition
+    tab1, tab2, tab3, tab4 = st.tabs(["📅 Monatsübersicht", "📈 Jahres-Vergleich (Chart)", "📊 Trends", "⚖️ Perioden-Vergleich"])
 
     # --- TAB 1: Monatsübersicht ---
     with tab1:
         st.subheader("Details pro Monat")
-        
         df['sort_key'] = df['date'].dt.year * 100 + df['date'].dt.month
         month_options = df[['Monat_Jahr', 'sort_key']].drop_duplicates().sort_values('sort_key', ascending=False)
         
-        if month_options.empty:
-            st.write("Keine Daten.")
-        else:
+        if not month_options.empty:
             selected_month_str = st.selectbox("Monat auswählen", month_options['Monat_Jahr'].unique())
-            
             df_month = df[df['Monat_Jahr'] == selected_month_str].copy()
             
             pivot = df_month.groupby(['category', 'type'])['amount'].sum().unstack(fill_value=0)
@@ -195,122 +173,146 @@ else:
             pivot['Genutzt %'] = (pivot['IST'] / pivot['SOLL'] * 100).fillna(0)
             
             col1, col2, col3 = st.columns(3)
-            total_soll = pivot['SOLL'].sum()
-            total_ist = pivot['IST'].sum()
-            col1.metric("Gesamt Budget", format_euro(total_soll))
-            col2.metric("Gesamt Ausgaben", format_euro(total_ist))
-            col3.metric("Restbetrag", format_euro(total_soll - total_ist), delta_color="normal")
+            col1.metric("Gesamt Budget", format_euro(pivot['SOLL'].sum()))
+            col2.metric("Gesamt Ausgaben", format_euro(pivot['IST'].sum()))
+            col3.metric("Restbetrag", format_euro(pivot['SOLL'].sum() - pivot['IST'].sum()))
             
-            st.dataframe(
-                pivot.style
-                .format("{:.2f} €", subset=['SOLL', 'IST', 'Verfügbar'])
-                .format("{:.1f} %", subset=['Genutzt %'])
-                .background_gradient(cmap="RdYlGn_r", subset=['Genutzt %'], vmin=0, vmax=120),
-                use_container_width=True
-            )
+            st.dataframe(pivot.style.format("{:.2f} €", subset=['SOLL', 'IST', 'Verfügbar']).format("{:.1f} %", subset=['Genutzt %']).background_gradient(cmap="RdYlGn_r", subset=['Genutzt %'], vmin=0, vmax=120), use_container_width=True)
             
-            with st.expander("Einzelbuchungen anzeigen"):
-                display_cols = ['date', 'category', 'description', 'amount', 'type']
-                st.dataframe(
-                    df_month[display_cols].sort_values(by='date', ascending=False)
-                    .style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}),
-                    hide_index=True,
-                    use_container_width=True
-                )
+            with st.expander("Einzelbuchungen"):
+                st.dataframe(df_month[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
 
-    # --- TAB 2: Trends ---
+    # --- TAB 2: TR STYLE JAHRESVERGLEICH (NEU) ---
     with tab2:
-        st.subheader("Verlauf über die Zeit")
+        st.subheader("📈 Ausgaben-Verlauf im Vergleich")
+        st.write("Vergleiche den Verlauf deiner Ausgaben (IST) über zwei Jahre hinweg.")
         
-        view_mode = st.radio("Gruppierung", ["Monatlich", "Quartalsweise", "Jährlich"], horizontal=True)
+        # 1. Filter für Kategorie
+        cat_options = ["Alle"] + sorted(current_categories)
+        selected_cat_chart = st.selectbox("Kategorie filtern", cat_options, index=0)
         
+        # 2. Filter für Jahre
+        available_years = sorted(df['Jahr'].unique())
+        col_y1, col_y2 = st.columns(2)
+        
+        current_year = date.today().year
+        # Logik für Default-Auswahl (Aktuelles Jahr vs Letztes Jahr)
+        idx_current = available_years.index(current_year) if current_year in available_years else len(available_years)-1
+        idx_last = idx_current - 1 if idx_current > 0 else idx_current
+        
+        with col_y1:
+            year_a = st.selectbox("Jahr A (Hauptlinie)", available_years, index=idx_current)
+        with col_y2:
+            year_b = st.selectbox("Jahr B (Vergleich)", available_years, index=idx_last)
+            
+        # 3. Daten aufbereiten
+        # Filtern auf IST (wir wollen Ausgaben sehen) und Kategorie
+        df_chart = df[df['type'] == 'IST'].copy()
+        if selected_cat_chart != "Alle":
+            df_chart = df_chart[df_chart['category'] == selected_cat_chart]
+            
+        # Funktion zum Gruppieren nach Monaten (1-12) für ein bestimmtes Jahr
+        def get_monthly_sums(dframe, y):
+            d_y = dframe[dframe['Jahr'] == y]
+            # Gruppieren nach Monat Nummer (1..12)
+            sums = d_y.groupby('Monat_Num')['amount'].sum()
+            # Sicherstellen, dass alle 12 Monate da sind (mit 0 füllen)
+            sums = sums.reindex(range(1, 13), fill_value=0)
+            return sums
+
+        data_a = get_monthly_sums(df_chart, year_a)
+        data_b = get_monthly_sums(df_chart, year_b)
+        
+        month_labels = [DE_MONTHS[i] for i in range(1, 13)]
+
+        # 4. Plotly Chart erstellen
+        fig = go.Figure()
+
+        # Linie Jahr A (Die "Aktuelle", dicke Linie, evtl mit Area Fill)
+        fig.add_trace(go.Scatter(
+            x=month_labels, 
+            y=data_a.values,
+            mode='lines+markers',
+            name=str(year_a),
+            line=dict(color='#0055ff', width=4), # Trade Republic ähnliches Blau
+            fill='tozeroy', # Fläche unter der Kurve füllen
+            fillcolor='rgba(0, 85, 255, 0.1)' # Leicht transparent
+        ))
+
+        # Linie Jahr B (Vergleich, gestrichelt oder dünner)
+        fig.add_trace(go.Scatter(
+            x=month_labels, 
+            y=data_b.values,
+            mode='lines+markers',
+            name=str(year_b),
+            line=dict(color='gray', width=2, dash='dot') # Dezent im Hintergrund
+        ))
+
+        # Layout Anpassungen für "Clean Look"
+        fig.update_layout(
+            title=f"Ausgaben: {selected_cat_chart} ({year_a} vs {year_b})",
+            xaxis_title="",
+            yaxis_title="Betrag in €",
+            template="plotly_white", # Weißer, sauberer Hintergrund
+            hovermode="x unified", # Tooltip zeigt beide Jahre gleichzeitig
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            ),
+            margin=dict(l=20, r=20, t=40, b=20)
+        )
+        
+        # Euro Formatierung auf der Y-Achse
+        fig.update_yaxes(tickprefix="", ticksuffix=" €")
+
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Kleine KPI Box darunter
+        diff_total = data_a.sum() - data_b.sum()
+        st.caption(f"Gesamtausgaben {year_a}: **{format_euro(data_a.sum())}** | Gesamtausgaben {year_b}: **{format_euro(data_b.sum())}**")
+        if diff_total > 0:
+            st.warning(f"Du hast in {year_a} bisher {format_euro(abs(diff_total))} MEHR ausgegeben als in {year_b}.")
+        elif diff_total < 0:
+            st.success(f"Du hast in {year_a} bisher {format_euro(abs(diff_total))} WENIGER ausgegeben als in {year_b}.")
+        else:
+            st.info("Ausgaben sind exakt gleich.")
+
+    # --- TAB 3: Trends (Alte Balken) ---
+    with tab3:
+        st.subheader("Balken-Übersicht")
+        view_mode = st.radio("Ansicht", ["Monatlich", "Quartalsweise", "Jährlich"], horizontal=True, key="trend_radio")
         if view_mode == "Monatlich":
             agg = df.groupby(['sort_key', 'Monat_Jahr', 'type'])['amount'].sum().unstack(fill_value=0)
-            agg = agg.reset_index().set_index('Monat_Jahr').sort_values('sort_key')
-            chart_data = agg[['SOLL', 'IST']] if 'SOLL' in agg and 'IST' in agg else agg
+            chart_data = agg.reset_index().set_index('Monat_Jahr').sort_values('sort_key')[['SOLL', 'IST']] if 'SOLL' in agg and 'IST' in agg else agg
         elif view_mode == "Quartalsweise":
-            agg = df.groupby(['Quartal', 'type'])['amount'].sum().unstack(fill_value=0)
-            chart_data = agg
+            chart_data = df.groupby(['Quartal', 'type'])['amount'].sum().unstack(fill_value=0)
         else:
-            agg = df.groupby(['Jahr', 'type'])['amount'].sum().unstack(fill_value=0)
-            chart_data = agg
-
+            chart_data = df.groupby(['Jahr', 'type'])['amount'].sum().unstack(fill_value=0)
         st.bar_chart(chart_data)
+
+    # --- TAB 4: Tabellarischer Vergleich ---
+    with tab4:
+        st.subheader("📊 Detaillierter Vergleich")
+        all_periods = [f"Monat: {x}" for x in df['Monat_Jahr'].unique()] + [f"Quartal: {x}" for x in df['Quartal'].unique()] + [f"Jahr: {x}" for x in df['Jahr'].unique()]
+        c1, c2 = st.columns(2)
+        p1 = c1.selectbox("Basis", all_periods, key="p1")
+        p2 = c2.selectbox("Vergleich", all_periods, key="p2", index=1 if len(all_periods)>1 else 0)
         
-        st.subheader("Ausgaben nach Kategorie (Total)")
-        df_ist = df[df['type'] == 'IST']
-        if not df_ist.empty:
-            cat_agg = df_ist.groupby('category')['amount'].sum().sort_values(ascending=False)
-            st.bar_chart(cat_agg)
-        else:
-            st.info("Keine Ausgabendaten vorhanden.")
-
-    # --- TAB 3: Vergleichsrechner ---
-    with tab3:
-        st.subheader("📊 Periodenvergleich")
-        
-        all_periods = []
-        all_periods += [f"Monat: {x}" for x in df['Monat_Jahr'].unique()]
-        all_periods += [f"Quartal: {x}" for x in df['Quartal'].unique()]
-        all_periods += [f"Jahr: {x}" for x in df['Jahr'].unique()]
-        
-        col_v1, col_v2 = st.columns(2)
-        with col_v1:
-            p1_sel = st.selectbox("Zeitraum A (Basis)", all_periods, index=0 if len(all_periods) > 0 else None)
-        with col_v2:
-            def_idx = 1 if len(all_periods) > 1 else 0
-            p2_sel = st.selectbox("Zeitraum B (Vergleich)", all_periods, index=def_idx)
-
-        if p1_sel and p2_sel:
-            def filter_period(selection):
-                type_, val = selection.split(": ")
-                if type_ == "Monat":
-                    return df[df['Monat_Jahr'] == val]
-                elif type_ == "Quartal":
-                    return df[df['Quartal'] == val]
-                elif type_ == "Jahr":
-                    return df[df['Jahr'].astype(str) == val]
-                return pd.DataFrame()
-
-            df_a = filter_period(p1_sel)
-            df_b = filter_period(p2_sel)
+        if p1 and p2:
+            def filter_p(sel):
+                t, v = sel.split(": ")
+                if t=="Monat": return df[df['Monat_Jahr']==v]
+                if t=="Quartal": return df[df['Quartal']==v]
+                if t=="Jahr": return df[df['Jahr'].astype(str)==v]
             
-            def get_cat_sums(dframe):
-                return dframe[dframe['type'] == 'IST'].groupby('category')['amount'].sum()
-
-            sum_a = get_cat_sums(df_a)
-            sum_b = get_cat_sums(df_b)
+            df_a, df_b = filter_p(p1), filter_p(p2)
+            sum_a = df_a[df_a['type']=='IST'].groupby('category')['amount'].sum()
+            sum_b = df_b[df_b['type']=='IST'].groupby('category')['amount'].sum()
             
-            comp_df = pd.DataFrame({'Basis (€)': sum_a, 'Vergleich (€)': sum_b}).fillna(0)
-            comp_df['Differenz (€)'] = comp_df['Basis (€)'] - comp_df['Vergleich (€)']
+            comp = pd.DataFrame({'Basis': sum_a, 'Vgl': sum_b}).fillna(0)
+            comp['Diff'] = comp['Basis'] - comp['Vgl']
+            comp['%'] = comp.apply(lambda r: (r['Diff']/r['Vgl']*100) if r['Vgl']!=0 else (100 if r['Basis']>0 else 0), axis=1)
             
-            def calc_pct(row):
-                if row['Vergleich (€)'] == 0:
-                    return 100.0 if row['Basis (€)'] > 0 else 0.0
-                return (row['Differenz (€)'] / row['Vergleich (€)']) * 100
-                
-            comp_df['Veränderung %'] = comp_df.apply(calc_pct, axis=1)
-            
-            total_row = pd.DataFrame({
-                'Basis (€)': [comp_df['Basis (€)'].sum()],
-                'Vergleich (€)': [comp_df['Vergleich (€)'].sum()],
-                'Differenz (€)': [comp_df['Basis (€)'].sum() - comp_df['Vergleich (€)'].sum()]
-            }, index=['GESAMT'])
-            total_row['Veränderung %'] = total_row.apply(calc_pct, axis=1)
-            
-            comp_df = pd.concat([comp_df, total_row])
-
-            st.write(f"Vergleich: **{p1_sel}** vs. **{p2_sel}**")
-            
-            def style_negative_red_positive_green(val):
-                if val == 0: return 'color: black'
-                color = 'red' if val > 0 else 'green'
-                return f'color: {color}; font-weight: bold'
-
-            st.dataframe(
-                comp_df.style
-                .format("{:.2f} €", subset=['Basis (€)', 'Vergleich (€)', 'Differenz (€)'])
-                .format("{:+.1f} %", subset=['Veränderung %'])
-                .applymap(style_negative_red_positive_green, subset=['Differenz (€)', 'Veränderung %']),
-                use_container_width=True
-            )
+            st.dataframe(comp.style.format("{:.2f} €", subset=['Basis','Vgl','Diff']).format("{:+.1f} %", subset=['%']).applymap(lambda v: f'color: {"red" if v>0 else "green"}; font-weight: bold' if v!=0 else 'color:black', subset=['Diff', '%']), use_container_width=True)
