@@ -88,7 +88,6 @@ def load_data():
             df['Jahr'] = df['date'].dt.year
             df['Monat_Jahr'] = df['Monat_Name'] + " " + df['Jahr'].astype(str)
             df['Quartal'] = "Q" + df['date'].dt.quarter.astype(str) + " " + df['Jahr'].astype(str)
-            # Sortierschlüssel für Dropdowns
             df['sort_key_month'] = df['Jahr'] * 100 + df['Monat_Num']
         return df
     except:
@@ -99,6 +98,22 @@ def save_transaction(dt, cat, desc, amt, typ):
     c = conn.cursor()
     c.execute("INSERT INTO transactions (date, category, description, amount, type) VALUES (?, ?, ?, ?, ?)",
               (dt, cat, desc, amt, typ))
+    conn.commit()
+    conn.close()
+
+def update_db_from_changes(changes):
+    """Verarbeitet Änderungen aus dem DataEditor"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # 1. Gelöschte Zeilen
+    for index in changes["deleted_rows"]:
+        # Wir brauchen die ID der gelöschten Zeile. 
+        # Da wir im Editor den originalen DataFrame index nutzen, müssen wir aufpassen.
+        # Der Editor gibt uns den Index im DataFrame.
+        # Wir holen die ID im Hauptteil des Codes, hier führen wir nur SQL aus.
+        pass # Logik wird direkt im UI Teil gemacht, da wir Zugriff auf DF brauchen
+        
     conn.commit()
     conn.close()
 
@@ -154,7 +169,8 @@ df = load_data()
 if df.empty:
     st.info("Bitte erstelle erste Einträge in der Sidebar.")
 else:
-    tab1, tab2, tab3, tab4 = st.tabs(["📅 Monatsübersicht", "📈 Verlauf (Chart)", "📊 Trends (Balken)", "⚖️ Perioden-Vergleich"])
+    # REITER DEFINITION
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 Monatsübersicht", "📈 Verlauf (Chart)", "📊 Trends (Balken)", "⚖️ Vergleich", "📝 Buchungen korrigieren"])
 
     # --- TAB 1: Monatsübersicht ---
     with tab1:
@@ -182,199 +198,193 @@ else:
             with st.expander("Einzelbuchungen"):
                 st.dataframe(df_month[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
 
-    # --- TAB 2: VERLAUF CHART (NEU: MONATE, QUARTALE, JAHRE) ---
+    # --- TAB 2: VERLAUF CHART ---
     with tab2:
-        st.subheader("📈 Ausgaben-Verlauf im Vergleich")
-        
-        # 1. Modus Auswahl
+        st.subheader("📈 Ausgaben-Verlauf")
         mode = st.radio("Vergleichs-Modus", ["Monate (Tag 1-31)", "Jahre (Jan-Dez)", "Quartale (Monat 1-3)"], horizontal=True)
-        
-        # Kategorie Filter
         cat_options = ["Alle"] + sorted(current_categories)
         selected_cat_chart = st.selectbox("Kategorie filtern", cat_options, index=0)
         
-        # Basis DataFrame filtern (Nur IST Ausgaben)
         df_chart = df[df['type'] == 'IST'].copy()
         if selected_cat_chart != "Alle":
             df_chart = df_chart[df_chart['category'] == selected_cat_chart]
 
-        # Initialisierung der Plot-Variablen
-        x_labels = []
-        data_a = []
-        data_b = []
-        name_a = ""
-        name_b = ""
+        x_labels, data_a, data_b, name_a, name_b = [], [], [], "", ""
         
-        # --- LOGIK: MONATS-VERGLEICH ---
         if "Monate" in mode:
-            # Optionen laden (sortiert)
             m_opts = df[['Monat_Jahr', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
             all_months = m_opts['Monat_Jahr'].unique()
-            
-            if len(all_months) < 1:
-                st.write("Nicht genügend Daten für Monatsvergleich.")
-            else:
-                col_m1, col_m2 = st.columns(2)
-                with col_m1: name_a = st.selectbox("Monat A (Blau)", all_months, index=0)
-                with col_m2: name_b = st.selectbox("Monat B (Grau)", all_months, index=1 if len(all_months)>1 else 0)
+            if len(all_months) >= 1:
+                c1, c2 = st.columns(2)
+                with c1: name_a = st.selectbox("A (Blau)", all_months, index=0)
+                with c2: name_b = st.selectbox("B (Grau)", all_months, index=1 if len(all_months)>1 else 0)
                 
-                # Funktion: Gruppieren nach Tag (1-31)
-                def get_daily_sums(dframe, m_str):
-                    d_m = dframe[dframe['Monat_Jahr'] == m_str]
-                    sums = d_m.groupby(d_m['date'].dt.day)['amount'].sum()
-                    sums = sums.reindex(range(1, 32), fill_value=0) # Alle Tage 1-31 auffüllen
-                    return sums
-
-                data_a = get_daily_sums(df_chart, name_a)
-                data_b = get_daily_sums(df_chart, name_b)
+                def get_d(dframe, m):
+                    d = dframe[dframe['Monat_Jahr'] == m]
+                    return d.groupby(d['date'].dt.day)['amount'].sum().reindex(range(1, 32), fill_value=0)
+                
+                data_a, data_b = get_d(df_chart, name_a), get_d(df_chart, name_b)
                 x_labels = list(range(1, 32))
-
-        # --- LOGIK: JAHRES-VERGLEICH ---
+        
         elif "Jahre" in mode:
             years = sorted(df['Jahr'].unique())
-            if not years:
-                st.write("Keine Jahresdaten.")
-            else:
-                col_y1, col_y2 = st.columns(2)
+            if years:
                 curr_y = date.today().year
-                idx_curr = years.index(curr_y) if curr_y in years else len(years)-1
-                idx_last = idx_curr - 1 if idx_curr > 0 else idx_curr
+                idx = years.index(curr_y) if curr_y in years else len(years)-1
+                c1, c2 = st.columns(2)
+                with c1: name_a = st.selectbox("A", years, index=idx)
+                with c2: name_b = st.selectbox("B", years, index=idx-1 if idx>0 else idx)
                 
-                with col_y1: name_a = st.selectbox("Jahr A (Blau)", years, index=idx_curr)
-                with col_y2: name_b = st.selectbox("Jahr B (Grau)", years, index=idx_last)
-                
-                def get_monthly_sums(dframe, y):
-                    d_y = dframe[dframe['Jahr'] == y]
-                    sums = d_y.groupby('Monat_Num')['amount'].sum()
-                    sums = sums.reindex(range(1, 13), fill_value=0)
-                    return sums
-
-                data_a = get_monthly_sums(df_chart, name_a)
-                data_b = get_monthly_sums(df_chart, name_b)
-                x_labels = [DE_MONTHS[i] for i in range(1, 13)]
+                def get_y(dframe, y):
+                    return dframe[dframe['Jahr']==y].groupby('Monat_Num')['amount'].sum().reindex(range(1,13), fill_value=0)
+                data_a, data_b = get_y(df_chart, name_a), get_y(df_chart, name_b)
+                x_labels = [DE_MONTHS[i] for i in range(1,13)]
                 name_a, name_b = str(name_a), str(name_b)
-
-        # --- LOGIK: QUARTALS-VERGLEICH ---
         else:
             qs = sorted(df['Quartal'].unique(), reverse=True)
-            if not qs:
-                st.write("Keine Quartalsdaten.")
-            else:
-                col_q1, col_q2 = st.columns(2)
-                with col_q1: name_a = st.selectbox("Quartal A (Blau)", qs, index=0)
-                with col_q2: name_b = st.selectbox("Quartal B (Grau)", qs, index=1 if len(qs)>1 else 0)
-                
-                # Helper: Relativer Monat im Quartal (1, 2, 3)
-                # Modulo Arithmetik: (Month - 1) % 3 + 1 -> Gibt 1, 2 oder 3 zurück
-                def get_q_month_sums(dframe, q_str):
-                    d_q = dframe[dframe['Quartal'] == q_str].copy()
-                    if d_q.empty: return pd.Series([0,0,0], index=[1,2,3])
-                    d_q['rel_month'] = (d_q['date'].dt.month - 1) % 3 + 1
-                    sums = d_q.groupby('rel_month')['amount'].sum()
-                    sums = sums.reindex(range(1, 4), fill_value=0)
-                    return sums
-
-                data_a = get_q_month_sums(df_chart, name_a)
-                data_b = get_q_month_sums(df_chart, name_b)
+            if qs:
+                c1, c2 = st.columns(2)
+                with c1: name_a = st.selectbox("A", qs, index=0)
+                with c2: name_b = st.selectbox("B", qs, index=1 if len(qs)>1 else 0)
+                def get_q(dframe, q):
+                    d = dframe[dframe['Quartal']==q].copy()
+                    if d.empty: return pd.Series([0,0,0], index=[1,2,3])
+                    d['rm'] = (d['date'].dt.month-1)%3+1
+                    return d.groupby('rm')['amount'].sum().reindex(range(1,4), fill_value=0)
+                data_a, data_b = get_q(df_chart, name_a), get_q(df_chart, name_b)
                 x_labels = ["1. Monat", "2. Monat", "3. Monat"]
 
-        # --- PLOTLY CHART ERSTELLEN ---
         if len(data_a) > 0:
             fig = go.Figure()
-
-            # Linie A (Blau, gefüllt)
-            fig.add_trace(go.Scatter(
-                x=x_labels, y=data_a.values,
-                mode='lines+markers', name=name_a,
-                line=dict(color='#0055ff', width=3),
-                fill='tozeroy', fillcolor='rgba(0, 85, 255, 0.1)'
-            ))
-
-            # Linie B (Grau, gestrichelt)
-            fig.add_trace(go.Scatter(
-                x=x_labels, y=data_b.values,
-                mode='lines+markers', name=name_b,
-                line=dict(color='gray', width=2, dash='dot')
-            ))
-
-            fig.update_layout(
-                title=f"{selected_cat_chart}: {name_a} vs. {name_b}",
-                yaxis_title="Ausgaben in €",
-                template="plotly_white",
-                hovermode="x unified",
-                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-                margin=dict(l=20, r=20, t=40, b=20)
-            )
-            fig.update_yaxes(tickprefix="", ticksuffix=" €")
-            
-            # X-Achsen Label anpassen je nach Modus
-            if "Monate" in mode:
-                fig.update_xaxes(title="Tag des Monats", tickmode='linear', tick0=1, dtick=1)
-            elif "Jahre" in mode:
-                fig.update_xaxes(title="Monat")
-            else:
-                fig.update_xaxes(title="Monat im Quartal")
-
+            fig.add_trace(go.Scatter(x=x_labels, y=data_a.values, mode='lines+markers', name=name_a, line=dict(color='#0055ff', width=3), fill='tozeroy', fillcolor='rgba(0, 85, 255, 0.1)'))
+            fig.add_trace(go.Scatter(x=x_labels, y=data_b.values, mode='lines+markers', name=name_b, line=dict(color='gray', width=2, dash='dot')))
+            fig.update_layout(title=f"{selected_cat_chart}: {name_a} vs {name_b}", yaxis_title="€", template="plotly_white", hovermode="x unified", legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01), margin=dict(l=20, r=20, t=40, b=20))
+            if "Monate" in mode: fig.update_xaxes(title="Tag", tickmode='linear', tick0=1, dtick=1)
             st.plotly_chart(fig, use_container_width=True)
-            
-            # Summen Vergleich
-            sum_a = data_a.sum()
-            sum_b = data_b.sum()
-            diff = sum_a - sum_b
-            
-            c_res1, c_res2, c_res3 = st.columns(3)
-            c_res1.metric(f"Summe {name_a}", format_euro(sum_a))
-            c_res2.metric(f"Summe {name_b}", format_euro(sum_b))
-            c_res3.metric("Differenz", format_euro(diff), delta=format_euro(diff), delta_color="inverse") # inverse: Rot wenn A > B (mehr Ausgaben)
 
-    # --- TAB 3: Trends (Balken) ---
+    # --- TAB 3: Trends ---
     with tab3:
         st.subheader("Balken-Übersicht")
         view_mode = st.radio("Ansicht", ["Monatlich", "Quartalsweise", "Jährlich"], horizontal=True, key="trend_radio")
-        
         if view_mode == "Monatlich":
             agg = df.groupby(['sort_key_month', 'Monat_Jahr', 'type'])['amount'].sum().unstack(fill_value=0)
             agg = agg.reset_index().sort_values('sort_key_month').set_index('Monat_Jahr')
-            cols_to_plot = [c for c in ['SOLL', 'IST'] if c in agg.columns]
-            st.bar_chart(agg[cols_to_plot])
-            
+            cols = [c for c in ['SOLL', 'IST'] if c in agg.columns]
+            st.bar_chart(agg[cols])
         elif view_mode == "Quartalsweise":
-            chart_data = df.groupby(['Quartal', 'type'])['amount'].sum().unstack(fill_value=0)
-            st.bar_chart(chart_data)
+            st.bar_chart(df.groupby(['Quartal', 'type'])['amount'].sum().unstack(fill_value=0))
         else:
-            chart_data = df.groupby(['Jahr', 'type'])['amount'].sum().unstack(fill_value=0)
-            st.bar_chart(chart_data)
+            st.bar_chart(df.groupby(['Jahr', 'type'])['amount'].sum().unstack(fill_value=0))
 
     # --- TAB 4: Vergleich ---
     with tab4:
         st.subheader("📊 Detaillierter Vergleich")
-        all_periods = [f"Monat: {x}" for x in df['Monat_Jahr'].unique()] + [f"Quartal: {x}" for x in df['Quartal'].unique()] + [f"Jahr: {x}" for x in df['Jahr'].unique()]
-        
-        if not all_periods:
-            st.write("Nicht genug Daten.")
-        else:
+        all_p = [f"Monat: {x}" for x in df['Monat_Jahr'].unique()] + [f"Quartal: {x}" for x in df['Quartal'].unique()] + [f"Jahr: {x}" for x in df['Jahr'].unique()]
+        if all_p:
             c1, c2 = st.columns(2)
-            p1 = c1.selectbox("Basis", all_periods, key="p1")
-            p2 = c2.selectbox("Vergleich", all_periods, key="p2", index=1 if len(all_periods)>1 else 0)
-            
+            p1 = c1.selectbox("Basis", all_p, key="p1")
+            p2 = c2.selectbox("Vgl", all_p, key="p2", index=1 if len(all_p)>1 else 0)
             if p1 and p2:
-                def filter_p(sel):
+                def f_p(sel):
                     t, v = sel.split(": ")
                     if t=="Monat": return df[df['Monat_Jahr']==v]
                     if t=="Quartal": return df[df['Quartal']==v]
                     if t=="Jahr": return df[df['Jahr'].astype(str)==v]
                     return pd.DataFrame()
-                
-                df_a, df_b = filter_p(p1), filter_p(p2)
-                
-                if df_a.empty or df_b.empty:
-                    st.warning("Keine Daten für Auswahl.")
-                else:
-                    sum_a = df_a[df_a['type']=='IST'].groupby('category')['amount'].sum()
-                    sum_b = df_b[df_b['type']=='IST'].groupby('category')['amount'].sum()
-                    
-                    comp = pd.DataFrame({'Basis': sum_a, 'Vgl': sum_b}).fillna(0)
-                    comp['Diff'] = comp['Basis'] - comp['Vgl']
-                    comp['%'] = comp.apply(lambda r: (r['Diff']/r['Vgl']*100) if r['Vgl']!=0 else (100 if r['Basis']>0 else 0), axis=1)
-                    
+                df_a, df_b = f_p(p1), f_p(p2)
+                if not df_a.empty and not df_b.empty:
+                    s_a, s_b = df_a[df_a['type']=='IST'].groupby('category')['amount'].sum(), df_b[df_b['type']=='IST'].groupby('category')['amount'].sum()
+                    comp = pd.DataFrame({'Basis': s_a, 'Vgl': s_b}).fillna(0)
+                    comp['Diff'], comp['%'] = comp['Basis']-comp['Vgl'], comp.apply(lambda r: (r['Basis']-r['Vgl'])/r['Vgl']*100 if r['Vgl']!=0 else (100 if r['Basis']>0 else 0), axis=1)
                     st.dataframe(comp.style.format("{:.2f} €", subset=['Basis','Vgl','Diff']).format("{:+.1f} %", subset=['%']).applymap(lambda v: f'color: {"red" if v>0 else "green"}; font-weight: bold' if v!=0 else 'color:black', subset=['Diff', '%']), use_container_width=True)
+
+    # --- TAB 5: KORREKTUREN (EDITOR) ---
+    with tab5:
+        st.subheader("📝 Buchungen bearbeiten")
+        st.write("Hier kannst du Tippfehler korrigieren oder falsche Buchungen löschen. Änderungen werden sofort gespeichert.")
+        
+        # 1. Daten laden für den Editor (Wir brauchen die 'id' Spalte, verstecken sie aber optisch nicht zwingend, oder machen sie disabled)
+        # Sortieren nach Datum neu -> alt
+        df_edit = df.sort_values(by=['date', 'id'], ascending=[False, False]).copy()
+        
+        # Wir formatieren das Datum für den Editor passend
+        # Streamlit DataEditor kommt gut mit datetime objekten klar
+        
+        # Spaltenkonfiguration
+        column_config = {
+            "id": st.column_config.NumberColumn("ID", disabled=True), # ID darf nicht geändert werden
+            "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
+            "category": st.column_config.SelectboxColumn("Kategorie", options=current_categories, required=True),
+            "type": st.column_config.SelectboxColumn("Typ", options=["SOLL", "IST"], required=True),
+            "amount": st.column_config.NumberColumn("Betrag (€)", format="%.2f €", min_value=0),
+            "description": st.column_config.TextColumn("Beschreibung"),
+            # Wir verstecken die Hilfsspalten
+            "Monat_Name": None, "Monat_Num": None, "Jahr": None, "Monat_Jahr": None, "Quartal": None, "sort_key_month": None, "sort_key": None
+        }
+        
+        # Der Editor
+        edited_df = st.data_editor(
+            df_edit,
+            key="transaction_editor",
+            column_config=column_config,
+            num_rows="dynamic", # Erlaubt Löschen und Hinzufügen (wobei Hinzufügen wir hier eher ignorieren, sidebar ist besser)
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Logik zum Speichern der Änderungen
+        # Streamlit session_state trackt Änderungen
+        if st.session_state["transaction_editor"]:
+            changes = st.session_state["transaction_editor"]
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            has_changes = False
+            
+            # 1. GELÖSCHTE ZEILEN (deleted_rows gibt Indices im angezeigten DF zurück)
+            if changes["deleted_rows"]:
+                # Liste der gelöschten Indizes (Positionen im df_edit)
+                deleted_indices = changes["deleted_rows"]
+                # Wir müssen die IDs der gelöschten Zeilen aus dem originalen df_edit holen
+                ids_to_delete = [df_edit.iloc[i]['id'] for i in deleted_indices]
+                
+                for del_id in ids_to_delete:
+                    c.execute("DELETE FROM transactions WHERE id = ?", (int(del_id),))
+                has_changes = True
+
+            # 2. BEARBEITETE ZEILEN (edited_rows ist ein Dict {index: {col: new_val}})
+            if changes["edited_rows"]:
+                for idx, col_changes in changes["edited_rows"].items():
+                    # ID der betroffenen Zeile
+                    row_id = df_edit.iloc[idx]['id']
+                    
+                    for col_name, new_value in col_changes.items():
+                        # Datum muss evtl konvertiert werden
+                        if col_name == "date":
+                            # new_value ist hier oft ein String im ISO format (YYYY-MM-DD)
+                            pass 
+                        
+                        query = f"UPDATE transactions SET {col_name} = ? WHERE id = ?"
+                        c.execute(query, (new_value, int(row_id)))
+                has_changes = True
+            
+            # 3. NEUE ZEILEN (added_rows) - Optional, falls jemand unten auf "+" klickt
+            if changes["added_rows"]:
+                for row in changes["added_rows"]:
+                    # Default Werte abfangen, falls user nicht alles ausfüllt
+                    dt = row.get("date", date.today())
+                    cat = row.get("category", current_categories[0] if current_categories else "Sonstiges")
+                    desc = row.get("description", "")
+                    amt = row.get("amount", 0.0)
+                    typ = row.get("type", "IST")
+                    
+                    c.execute("INSERT INTO transactions (date, category, description, amount, type) VALUES (?, ?, ?, ?, ?)",
+                              (dt, cat, desc, amt, typ))
+                has_changes = True
+
+            if has_changes:
+                conn.commit()
+                conn.close()
+                st.success("Änderungen gespeichert!")
+                st.rerun() # Seite neu laden, um DB Update anzuzeigen
+            else:
+                conn.close()
