@@ -43,13 +43,10 @@ def init_db():
     ''')
     
     # 2. Migration: Neue Spalte 'budget_month' hinzufügen, falls sie fehlt
-    # Das löst dein Problem mit dem 29.10. -> November
     try:
         c.execute("SELECT budget_month FROM transactions LIMIT 1")
     except sqlite3.OperationalError:
-        # Spalte existiert nicht, wir fügen sie hinzu
         c.execute("ALTER TABLE transactions ADD COLUMN budget_month TEXT")
-        # Bestehende Daten patchen: Budget-Monat = Monat des Datums
         c.execute("UPDATE transactions SET budget_month = strftime('%Y-%m', date) WHERE budget_month IS NULL")
         conn.commit()
 
@@ -99,36 +96,32 @@ def load_data():
         conn.close()
         if not df.empty:
             df['date'] = pd.to_datetime(df['date'])
-            # Hilfsspalten
             df['Monat_Name'] = df['date'].dt.month.map(DE_MONTHS)
             df['Monat_Num'] = df['date'].dt.month
             df['Jahr'] = df['date'].dt.year
             df['Quartal'] = "Q" + df['date'].dt.quarter.astype(str) + " " + df['Jahr'].astype(str)
             
-            # WICHTIG: Zuordnung für die Statistik
-            # IST (Ausgaben) zählen immer zum Datum, an dem sie passiert sind
-            # SOLL (Budget) zählt zu dem Monat, für den es gedacht ist ('budget_month')
-            
-            # Wir bauen eine einheitliche 'Analysis_Month' Spalte
-            # Wenn budget_month leer ist (Legacy Data), nimm das Datum
             df['budget_month'] = df['budget_month'].fillna(df['date'].dt.strftime('%Y-%m'))
             
             def get_analysis_month(row):
                 if row['type'] == 'SOLL':
-                    # Beim Budget zählt der Zielmonat (z.B. "2025-11")
-                    y, m = map(int, row['budget_month'].split('-'))
-                    return f"{DE_MONTHS[m]} {y}"
+                    try:
+                        y, m = map(int, row['budget_month'].split('-'))
+                        return f"{DE_MONTHS[m]} {y}"
+                    except:
+                        return f"{DE_MONTHS[row['date'].month]} {row['date'].year}"
                 else:
-                    # Bei Ausgaben zählt das Datum
                     return f"{DE_MONTHS[row['date'].month]} {row['date'].year}"
 
             df['Analyse_Monat'] = df.apply(get_analysis_month, axis=1)
             
-            # Sortierschlüssel (YYYYMM) für den Analyse Monat berechnen
             def get_sort_key(row):
                 if row['type'] == 'SOLL':
-                     parts = row['budget_month'].split('-')
-                     return int(parts[0]) * 100 + int(parts[1])
+                     try:
+                        parts = row['budget_month'].split('-')
+                        return int(parts[0]) * 100 + int(parts[1])
+                     except:
+                        return row['date'].year * 100 + row['date'].month
                 else:
                     return row['date'].year * 100 + row['date'].month
             
@@ -136,30 +129,21 @@ def load_data():
 
         return df
     except Exception as e:
-        st.error(f"Ladefehler: {e}")
+        # st.error(f"Ladefehler: {e}") # Debugging ausblenden
         return pd.DataFrame()
 
 def save_transaction(dt, cat, desc, amt, typ, budget_mon=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Wenn kein expliziter Budget-Monat, nimm den vom Datum
     if not budget_mon:
         budget_mon = dt.strftime("%Y-%m")
-        
     c.execute("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?, ?, ?, ?, ?, ?)",
               (dt, cat, desc, amt, typ, budget_mon))
     conn.commit()
     conn.close()
 
 def perform_transfer(date_val, cat_from, cat_to, amount):
-    """Führt eine Umbuchung durch: Minus im Budget A, Plus im Budget B"""
-    # 1. Abgang beim Sender (Wir reduzieren sein Budget)
-    # Wir buchen das als negatives SOLL. Warum? Weil eine Umbuchung keine Ausgabe (IST) ist,
-    # sondern eine Budget-Korrektur. 
-    # Wenn wir IST nehmen würden, würde es so aussehen, als hätten wir Geld ausgegeben.
     save_transaction(date_val, cat_from, f"Umbuchung zu {cat_to}", -amount, "SOLL", date_val.strftime("%Y-%m"))
-    
-    # 2. Zugang beim Empfänger
     save_transaction(date_val, cat_to, f"Umbuchung von {cat_from}", amount, "SOLL", date_val.strftime("%Y-%m"))
 
 # Initialisierung
@@ -175,24 +159,20 @@ st.title("💶 Mein Cash Stuffing Planer")
 sb_tab1, sb_tab2 = st.sidebar.tabs(["📝 Neuer Eintrag", "💸 Umbuchung"])
 current_categories = get_categories()
 
-# TAB 1: EINTARG
+# TAB 1: EINTRAG
 with sb_tab1:
     with st.form("entry_form", clear_on_submit=True):
         date_input = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
         type_input = st.selectbox("Typ", ["SOLL (Budget einzahlen)", "IST (Ausgabe)"])
         
-        # LOGIK: BUDGET MONAT WÄHLEN
-        # Wenn SOLL gewählt ist, zeige Auswahl für Zielmonat
         budget_target = None
         if "SOLL" in type_input:
             st.caption("Für welchen Monat ist dieses Budget?")
             today = date.today()
-            # Optionen: Dieser Monat, Nächster Monat
             this_month_str = today.strftime("%Y-%m")
             next_month_date = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
             next_month_str = next_month_date.strftime("%Y-%m")
             
-            # Formatieren für Anzeige
             this_lbl = f"{DE_MONTHS[today.month]} {today.year}"
             next_lbl = f"{DE_MONTHS[next_month_date.month]} {next_month_date.year}"
             
@@ -217,13 +197,12 @@ with sb_tab1:
 
 # TAB 2: UMBUCHUNG
 with sb_tab2:
-    st.write("Verschiebe Geld von einem Umschlag in einen anderen (z.B. Restbetrag in Spar-Topf).")
+    st.write("Verschiebe Geld zwischen Umschlägen.")
     with st.form("transfer_form", clear_on_submit=True):
         t_date = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
         if len(current_categories) >= 2:
             c1, c2 = st.columns(2)
             cat_from = c1.selectbox("Von (Quelle)", current_categories, index=0)
-            # Versuche intelligenten Default für Ziel (z.B. Sparen oder Notgroschen)
             def_idx = 1
             for i, c in enumerate(current_categories):
                 if "Spar" in c or "Notgroschen" in c:
@@ -231,7 +210,6 @@ with sb_tab2:
                         def_idx = i
                         break
             cat_to = c2.selectbox("Nach (Ziel)", current_categories, index=def_idx)
-            
             t_amt = st.number_input("Betrag (€)", min_value=0.0, format="%.2f", key="t_amt")
             
             t_sub = st.form_submit_button("Umbuchen")
@@ -240,10 +218,10 @@ with sb_tab2:
                     st.error("Quelle und Ziel müssen unterschiedlich sein.")
                 else:
                     perform_transfer(t_date, cat_from, cat_to, t_amt)
-                    st.success(f"{t_amt}€ von {cat_from} nach {cat_to} verschoben.")
+                    st.success(f"{t_amt}€ umgebucht.")
                     st.rerun()
         else:
-            st.warning("Du brauchst mindestens 2 Kategorien für eine Umbuchung.")
+            st.warning("Zu wenig Kategorien.")
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("⚙️ Kategorien verwalten"):
@@ -252,7 +230,6 @@ with st.sidebar.expander("⚙️ Kategorien verwalten"):
         if new_cat_name:
             if add_category_to_db(new_cat_name):
                 st.rerun()
-    
     st.markdown("---")
     del_cat_name = st.selectbox("Löschen", current_categories, key="del_cat_select") if current_categories else None
     if st.button("Löschen"):
@@ -266,40 +243,27 @@ df = load_data()
 if df.empty:
     st.info("Bitte erstelle erste Einträge in der Sidebar.")
 else:
-    # REITER DEFINITION
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 Monatsübersicht", "📈 Verlauf", "📊 Trends", "⚖️ Vergleich", "📝 Editor"])
 
-    # --- TAB 1: Monatsübersicht (MIT ÜBERTRAG LOGIK) ---
+    # --- TAB 1: Monatsübersicht ---
     with tab1:
         st.subheader("Details pro Monat")
-        
-        # Dropdown Optionen bauen
         month_options = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
         
         if not month_options.empty:
             selected_month_label = st.selectbox("Monat auswählen", month_options['Analyse_Monat'].unique())
-            
-            # Wir müssen wissen, welcher numerische Sort-Key das ist, um "Vormonate" zu berechnen
             current_sort_key = month_options[month_options['Analyse_Monat'] == selected_month_label]['sort_key_month'].iloc[0]
             
-            # 1. Daten für AKTUELLEN Monat
             df_curr = df[df['sort_key_month'] == current_sort_key].copy()
-            
-            # 2. Daten für ALLE VORHERIGEN Monate (für Übertrag)
             df_prev = df[df['sort_key_month'] < current_sort_key].copy()
             
-            # --- BERECHNUNG ÜBERTRAG (Rollover) ---
-            # Summe aller SOLLs der Vergangenheit - Summe aller ISTs der Vergangenheit
-            # Das ist das Geld, das noch im Umschlag liegt.
             prev_soll = df_prev[df_prev['type'] == 'SOLL'].groupby('category')['amount'].sum()
             prev_ist = df_prev[df_prev['type'] == 'IST'].groupby('category')['amount'].sum()
             carryover = prev_soll.subtract(prev_ist, fill_value=0)
             
-            # --- BERECHNUNG AKTUELL ---
             curr_soll = df_curr[df_curr['type'] == 'SOLL'].groupby('category')['amount'].sum()
             curr_ist = df_curr[df_curr['type'] == 'IST'].groupby('category')['amount'].sum()
             
-            # Alles zusammenführen
             overview = pd.DataFrame({
                 'Übertrag Vormonat': carryover,
                 'Budget (Neu)': curr_soll,
@@ -310,20 +274,13 @@ else:
             overview['Rest'] = overview['Gesamt Verfügbar'] - overview['Ausgaben (IST)']
             overview['Genutzt %'] = (overview['Ausgaben (IST)'] / overview['Gesamt Verfügbar'] * 100).fillna(0)
             
-            # KPIs
             c1, c2, c3, c4 = st.columns(4)
-            sum_carry = overview['Übertrag Vormonat'].sum()
-            sum_new = overview['Budget (Neu'].sum()
-            sum_ist = overview['Ausgaben (IST)'].sum()
-            sum_rest = overview['Rest'].sum()
+            c1.metric("Übertrag (Alt)", format_euro(overview['Übertrag Vormonat'].sum()))
+            # KORREKTUR HIER: Klammer hinzugefügt
+            c2.metric("Frisches Budget", format_euro(overview['Budget (Neu)'].sum()))
+            c3.metric("Ausgaben", format_euro(overview['Ausgaben (IST)'].sum()))
+            c4.metric("Aktueller Rest", format_euro(overview['Rest'].sum()))
             
-            c1.metric("Übertrag (Alt)", format_euro(sum_carry), help="Geld, das aus Vormonaten übrig blieb")
-            c2.metric("Frisches Budget", format_euro(sum_new), help="Geld, das diesem Monat zugewiesen wurde")
-            c3.metric("Ausgaben", format_euro(sum_ist))
-            c4.metric("Aktueller Rest", format_euro(sum_rest))
-            
-            # Tabelle
-            # Styling: Übertrag grau, Budget blau, Rest fett
             st.dataframe(
                 overview.style
                 .format("{:.2f} €", subset=['Übertrag Vormonat', 'Budget (Neu)', 'Ausgaben (IST)', 'Gesamt Verfügbar', 'Rest'])
@@ -334,9 +291,7 @@ else:
                 use_container_width=True
             )
             
-            st.caption("Hinweis: Wenn du 'Übertrag Vormonat' in den Notgroschen verschieben willst, nutze die Funktion 'Umbuchung' in der Sidebar.")
-
-            with st.expander("Einzelbuchungen diesen Monat"):
+            with st.expander("Einzelbuchungen anzeigen"):
                 st.dataframe(df_curr[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
 
     # --- TAB 2: VERLAUF ---
@@ -358,12 +313,9 @@ else:
                 c1, c2 = st.columns(2)
                 with c1: n_a = st.selectbox("A", all_m, index=0)
                 with c2: n_b = st.selectbox("B", all_m, index=1 if len(all_m)>1 else 0)
-                
                 def get_d(dframe, m_lbl):
-                    # Filterung über Analyse_Monat
                     d = dframe[dframe['Analyse_Monat'] == m_lbl]
                     return d.groupby(d['date'].dt.day)['amount'].sum().reindex(range(1, 32), fill_value=0)
-                
                 y_a, y_b = get_d(df_c, n_a), get_d(df_c, n_b)
                 x_vals = list(range(1, 32))
                 
@@ -406,7 +358,6 @@ else:
         st.subheader("Balken-Übersicht")
         vm = st.radio("Ansicht", ["Monatlich", "Quartalsweise", "Jährlich"], horizontal=True, key="tr_rad")
         if vm == "Monatlich":
-            # Hier nutzen wir Analyse_Monat für die Achse
             agg = df.groupby(['sort_key_month', 'Analyse_Monat', 'type'])['amount'].sum().unstack(fill_value=0)
             agg = agg.reset_index().sort_values('sort_key_month').set_index('Analyse_Monat')
             cols = [c for c in ['SOLL', 'IST'] if c in agg.columns]
@@ -443,7 +394,6 @@ else:
         st.subheader("📝 Daten korrigieren")
         df_ed = df.sort_values(by=['date', 'id'], ascending=[False, False]).copy()
         
-        # Zeige Budget Monat im Editor, falls vorhanden
         col_conf = {
             "id": st.column_config.NumberColumn("ID", disabled=True),
             "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
@@ -465,11 +415,22 @@ else:
             
             if chg["deleted_rows"]:
                 for idx in chg["deleted_rows"]:
-                    c.execute("DELETE FROM transactions WHERE id = ?", (int(df_ed.iloc[idx]['id']),))
+                    # Prüfen, ob der Index im DataFrame existiert
+                    if idx in df_ed.index: 
+                       # Wir müssen sicherstellen, dass wir die richtige ID über den Range-Index des df_ed bekommen
+                       # df_ed ist ein Snapshot. 
+                       # Achtung: data_editor indices beziehen sich auf die Position im angezeigten Frame.
+                       # Wir holen die ID sicherheitshalber direkt über iloc
+                       try:
+                           row_id = df_ed.iloc[idx]['id']
+                           c.execute("DELETE FROM transactions WHERE id = ?", (int(row_id),))
+                       except:
+                           pass # Index out of bounds prevention
                 mod = True
                 
             if chg["edited_rows"]:
                 for idx, row_chg in chg["edited_rows"].items():
+                    # Auch hier: iloc verwenden
                     rid = df_ed.iloc[idx]['id']
                     for k, v in row_chg.items():
                         c.execute(f"UPDATE transactions SET {k} = ? WHERE id = ?", (v, int(rid)))
@@ -478,8 +439,16 @@ else:
             if chg["added_rows"]:
                 for r in chg["added_rows"]:
                     dt = r.get("date", date.today())
-                    # Default Budget Monat ist Monat des Datums
-                    bm = r.get("budget_month", dt.strftime("%Y-%m"))
+                    # Formatierung des Datums beim Hinzufügen checken
+                    if isinstance(dt, str):
+                        # Falls String, versuchen zu parsen oder so lassen (SQLite frisst Strings)
+                        pass 
+                    bm = r.get("budget_month", None)
+                    if not bm and isinstance(dt, (date, datetime.datetime)):
+                        bm = dt.strftime("%Y-%m")
+                    elif not bm:
+                        bm = date.today().strftime("%Y-%m")
+                        
                     c.execute("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?, ?, ?, ?, ?, ?)",
                               (dt, r.get("category", "Sonstiges"), r.get("description", ""), r.get("amount", 0.0), r.get("type", "IST"), bm))
                 mod = True
