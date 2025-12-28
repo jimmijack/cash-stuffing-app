@@ -58,13 +58,13 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, category TEXT, description TEXT, amount REAL, type TEXT, budget_month TEXT, is_online INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, priority TEXT DEFAULT 'Standard', target_amount REAL DEFAULT 0.0, due_date TEXT, notes TEXT, is_fixed INTEGER DEFAULT 0, default_budget REAL DEFAULT 0.0)''')
     
-    # NEU: Kredite Tabelle
+    # Kredite Tabelle (Angepasst)
     c.execute('''CREATE TABLE IF NOT EXISTS loans (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
         start_date TEXT,
         total_amount REAL,
-        interest_rate REAL,
+        interest_amount REAL DEFAULT 0.0,
         term_months INTEGER,
         monthly_payment REAL
     )''')
@@ -73,6 +73,12 @@ def init_db():
     try: c.execute("SELECT default_budget FROM categories LIMIT 1")
     except: c.execute("ALTER TABLE categories ADD COLUMN default_budget REAL DEFAULT 0.0")
     
+    # Migration für Kredite (Zinssumme statt Rate, falls alt)
+    try: c.execute("SELECT interest_amount FROM loans LIMIT 1")
+    except: 
+        # Falls alte Spalte interest_rate existiert, lassen wir sie, fügen aber interest_amount hinzu
+        c.execute("ALTER TABLE loans ADD COLUMN interest_amount REAL DEFAULT 0.0")
+
     c.execute("SELECT count(*) FROM categories")
     if c.fetchone()[0] == 0:
         for cat in DEFAULT_CATEGORIES:
@@ -88,7 +94,7 @@ def get_data(query, params=()):
     conn.close()
     return df
 
-# --- Fehlende Funktionen Wrapper ---
+# --- Wrapper ---
 def add_category_to_db(new_cat, prio, is_fixed=0):
     return execute_db("INSERT INTO categories (name, priority, is_fixed) VALUES (?, ?, ?)", (new_cat, prio, is_fixed))
 
@@ -243,16 +249,16 @@ with st.sidebar:
     elif sb_mode == "📉 Kredite":
         st.subheader("Kredit hinzufügen")
         with st.form("loan_add"):
-            l_name = st.text_input("Name (z.B. PayPal Laptop)")
-            l_sum = st.number_input("Kreditsumme (€)", min_value=0.0, step=50.0)
+            l_name = st.text_input("Name (z.B. PayPal)")
+            l_sum = st.number_input("Kreditsumme (€)", min_value=0.0, step=50.0, help="Ursprüngliche Nettokreditsumme")
+            l_zins_sum = st.number_input("Zinsen Gesamt (€)", min_value=0.0, step=10.0, help="Die absolute Summe der Zinsen über die gesamte Laufzeit.")
             l_rate = st.number_input("Rate (€/Monat)", min_value=0.0, step=10.0)
-            l_zins = st.number_input("Zins (% p.a.)", min_value=0.0, step=0.1)
-            l_start = st.date_input("Startdatum", date.today())
+            l_start = st.date_input("Datum der 1. Rate", date.today(), help="Wichtig für korrekten Fortschritt!")
             l_term = st.number_input("Laufzeit (Monate)", min_value=1, value=12)
             
             if st.form_submit_button("Kredit anlegen", use_container_width=True):
-                execute_db("INSERT INTO loans (name, start_date, total_amount, interest_rate, term_months, monthly_payment) VALUES (?,?,?,?,?,?)",
-                           (l_name, l_start, l_sum, l_zins, l_term, l_rate))
+                execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)",
+                           (l_name, l_start, l_sum, l_zins_sum, l_term, l_rate))
                 st.success("Gespeichert!")
                 st.rerun()
 
@@ -319,7 +325,7 @@ if df.empty and not current_categories:
 else:
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["📊 Dashboard", "🎯 Sparziele", "📉 Kredite", "📈 Analyse", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
 
-    # T1
+    # T1 Dashboard
     with t1:
         if df.empty: st.info("Keine Daten.")
         else:
@@ -422,7 +428,7 @@ else:
                         execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
                     st.rerun()
 
-    # T3 Kredite (NEU)
+    # T3 Kredite (Optimiert)
     with t3:
         st.subheader("📉 Kredit Übersicht")
         loans_df = get_data("SELECT * FROM loans")
@@ -432,61 +438,70 @@ else:
         else:
             loans_df['start_date'] = pd.to_datetime(loans_df['start_date'])
             
-            # Berechnungen
+            # Berechnungen FIX
             def calc_loan(row):
+                # Gesamtbelastung (Kredit + Zinsen Fix)
+                total_liability = row['total_amount'] + row.get('interest_amount', 0.0)
+                
+                # Monate seit Start (Robustere Berechnung)
+                today = date.today()
+                start = row['start_date'].date()
+                
+                if today < start:
+                    months_passed = 0
+                else:
+                    # Einfache Monatsdifferenz
+                    months_passed = (today.year - start.year) * 12 + (today.month - start.month)
+                    # Den aktuellen Monat als "angebrochen/gezahlt" werten?
+                    # Meistens zahlt man am Anfang oder Ende. Wir zählen ihn dazu.
+                    months_passed += 1 
+                
+                # Cap bei Laufzeit
+                if months_passed > row['term_months']: months_passed = row['term_months']
+                
+                # Gezahlt bisher
+                paid_so_far = months_passed * row['monthly_payment']
+                if paid_so_far > total_liability: paid_so_far = total_liability
+                
+                # Rest
+                remaining = total_liability - paid_so_far
+                
+                # Progress
+                progress = paid_so_far / total_liability if total_liability > 0 else 0
+                
+                # Enddatum
                 end_date = row['start_date'] + relativedelta(months=row['term_months'])
-                today = datetime.datetime.now()
                 
-                if today > end_date:
-                    return "✅ Bezahlt", 1.0, 0.0, end_date
+                status = "✅ Bezahlt" if remaining <= 0 else f"{int(row['term_months'] - months_passed)} Raten offen"
                 
-                # Monate vergangen
-                diff = relativedelta(today, row['start_date'])
-                months_passed = diff.years*12 + diff.months
-                if months_passed < 0: months_passed = 0
-                
-                progress = months_passed / row['term_months']
-                
-                # Sehr grobe Restschuld Schätzung (Linear)
-                # Genauer geht es nur mit Amortisationsplan, aber das reicht für Overview
-                paid = months_passed * row['monthly_payment']
-                # Hier nehmen wir vereinfacht an: Restlaufzeit * Rate = Restschuld (inkl Zins)
-                remaining_months = row['term_months'] - months_passed
-                remaining_amount = remaining_months * row['monthly_payment']
-                
-                return f"Noch {remaining_months} Mon.", progress, remaining_amount, end_date
+                return status, progress, remaining, end_date, total_liability
 
             res = loans_df.apply(calc_loan, axis=1, result_type='expand')
             loans_df['Status'] = res[0]
             loans_df['Progress'] = res[1]
-            loans_df['Rest (ca.)'] = res[2]
+            loans_df['Rest'] = res[2]
             loans_df['Ende'] = res[3]
+            loans_df['Gesamt'] = res[4]
             
             # KPIs
-            total_monthly = loans_df[loans_df['Ende'] > datetime.datetime.now()]['monthly_payment'].sum()
-            total_debt = loans_df['Rest (ca.)'].sum()
-            debt_free_date = loans_df['Ende'].max().strftime("%b %Y")
+            total_monthly = loans_df[loans_df['Rest'] > 0]['monthly_payment'].sum()
+            total_debt = loans_df['Rest'].sum()
             
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Monatliche Rate (Gesamt)", format_euro(total_monthly))
-            c2.metric("Restschuld (ca. inkl. Zins)", format_euro(total_debt))
-            c3.metric("Schuldenfrei ab", debt_free_date)
+            c1, c2 = st.columns(2)
+            c1.metric("Monatliche Belastung", format_euro(total_monthly))
+            c2.metric("Gesamtschulden (Rest)", format_euro(total_debt))
             
-            # Highlight highest Interest
-            max_int_idx = loans_df['interest_rate'].idxmax()
-            st.caption(f"🔥 Fokus-Empfehlung (Lawine): **{loans_df.loc[max_int_idx, 'name']}** hat mit {loans_df.loc[max_int_idx, 'interest_rate']}% den höchsten Zins.")
-            
-            # Editor
             loan_cfg = {
                 "id": st.column_config.NumberColumn(disabled=True),
                 "name": st.column_config.TextColumn("Kredit"),
                 "start_date": st.column_config.DateColumn("Start"),
-                "total_amount": st.column_config.NumberColumn("Kreditsumme", format="%.2f €"),
-                "interest_rate": st.column_config.NumberColumn("Zins %"),
+                "total_amount": st.column_config.NumberColumn("Nettokredit", format="%.2f €"),
+                "interest_amount": st.column_config.NumberColumn("Zinsen €", format="%.2f €"),
+                "Gesamt": st.column_config.NumberColumn("Bruttoschuld", format="%.2f €", disabled=True),
                 "term_months": st.column_config.NumberColumn("Laufzeit (M)"),
                 "monthly_payment": st.column_config.NumberColumn("Rate", format="%.2f €"),
-                "Progress": st.column_config.ProgressColumn("Fortschritt", format="%.0f%%"),
-                "Rest (ca.)": st.column_config.NumberColumn(format="%.2f €", disabled=True),
+                "Progress": st.column_config.ProgressColumn("Status", format="%.0f%%"),
+                "Rest": st.column_config.NumberColumn("Restschuld", format="%.2f €", disabled=True),
                 "Ende": st.column_config.DateColumn(format="DD.MM.YYYY", disabled=True),
                 "Status": st.column_config.TextColumn(disabled=True)
             }
@@ -497,10 +512,9 @@ else:
                 hide_index=True,
                 use_container_width=True,
                 column_config=loan_cfg,
-                column_order=["name", "monthly_payment", "Rest (ca.)", "Progress", "Status", "interest_rate", "total_amount", "start_date", "term_months", "Ende"]
+                column_order=["name", "monthly_payment", "Rest", "Progress", "Gesamt", "interest_amount", "start_date", "term_months", "Ende"]
             )
             
-            # Save Logic
             if st.session_state["loan_editor"]:
                 chg = st.session_state["loan_editor"]
                 for i in chg["deleted_rows"]: 
@@ -508,11 +522,8 @@ else:
                 for i, v in chg["edited_rows"].items():
                     lid = loans_df.iloc[i]['id']
                     for k, val in v.items():
-                        # Date fix
-                        if k == 'start_date':
-                             if isinstance(val, (datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
+                        if k == 'start_date' and isinstance(val, (datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
                         execute_db(f"UPDATE loans SET {k}=? WHERE id=?", (val, int(lid)))
-                
                 if chg["deleted_rows"] or chg["edited_rows"]: st.rerun()
 
     # T4 Analyse
