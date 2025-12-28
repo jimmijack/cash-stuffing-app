@@ -10,19 +10,22 @@ import plotly.express as px
 # --- 1. KONFIGURATION & CSS ---
 st.set_page_config(page_title="Cash Stuffing Planer", layout="wide", page_icon="💶")
 
-# Custom CSS für besseres UI/UX (Reduziert Whitespace, hübschere Metriken)
+# Custom CSS - Theme Aware (Dark/Light Mode kompatibel)
 st.markdown("""
     <style>
         .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
+        
         /* Metrik-Boxen stylen */
         div[data-testid="stMetric"] {
-            background-color: #f8f9fa;
-            border: 1px solid #e9ecef;
+            background-color: var(--secondary-background-color);
+            border: 1px solid rgba(128, 128, 128, 0.2);
             padding: 10px;
             border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            color: var(--text-color);
         }
-        /* Tabellen Header */
+        
+        /* Tabellen Header (Index verstecken) */
         thead tr th:first-child {display:none}
         tbody th {display:none}
     </style>
