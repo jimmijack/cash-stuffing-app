@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import datetime
 from datetime import date, timedelta
+from dateutil.relativedelta import relativedelta # Neu für genauere Monatsberechnung
 import plotly.graph_objects as go
 
 # --- Konfiguration & Setup ---
@@ -40,46 +41,51 @@ def init_db():
             category TEXT,
             description TEXT,
             amount REAL,
-            type TEXT
+            type TEXT,
+            budget_month TEXT
         )
     ''')
     
-    # Migration Budget Month
-    try:
-        c.execute("SELECT budget_month FROM transactions LIMIT 1")
-    except sqlite3.OperationalError:
-        c.execute("ALTER TABLE transactions ADD COLUMN budget_month TEXT")
-        c.execute("UPDATE transactions SET budget_month = strftime('%Y-%m', date) WHERE budget_month IS NULL")
-        conn.commit()
-
     # 2. Kategorien
     c.execute('''
         CREATE TABLE IF NOT EXISTS categories (
-            name TEXT PRIMARY KEY
+            name TEXT PRIMARY KEY,
+            priority TEXT DEFAULT 'Standard'
         )
     ''')
     
-    # Migration: Priority Spalte hinzufügen
+    # MIGRATION: Neue Spalten für Sinking Funds hinzufügen
+    # Wir prüfen einzeln, ob die Spalten existieren
     try:
-        c.execute("SELECT priority FROM categories LIMIT 1")
+        c.execute("SELECT target_amount FROM categories LIMIT 1")
     except sqlite3.OperationalError:
-        c.execute("ALTER TABLE categories ADD COLUMN priority TEXT DEFAULT 'Standard'")
-        conn.commit()
-
+        c.execute("ALTER TABLE categories ADD COLUMN target_amount REAL DEFAULT 0.0")
+        
+    try:
+        c.execute("SELECT due_date FROM categories LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE categories ADD COLUMN due_date TEXT")
+        
+    try:
+        c.execute("SELECT notes FROM categories LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE categories ADD COLUMN notes TEXT")
+        
+    conn.commit()
+    
     # Initiale Kategorien
     c.execute("SELECT count(*) FROM categories")
     if c.fetchone()[0] == 0:
         for cat in DEFAULT_CATEGORIES:
-            # Wichtige Dinge Standardmäßig auf A setzen? Hier erst mal alles Standard
             c.execute("INSERT OR IGNORE INTO categories (name, priority) VALUES (?, ?)", (cat, "Standard"))
             
     conn.commit()
     conn.close()
 
 def get_categories_df():
-    """Lädt Kategorien inkl. Priorität als DataFrame"""
+    """Lädt Kategorien inkl. aller Sinking Fund Daten"""
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT name, priority FROM categories ORDER BY name ASC", conn)
+    df = pd.read_sql_query("SELECT * FROM categories ORDER BY name ASC", conn)
     conn.close()
     return df
 
@@ -103,6 +109,15 @@ def update_category_priority(cat_name, new_prio):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("UPDATE categories SET priority = ? WHERE name = ?", (new_prio, cat_name))
+    conn.commit()
+    conn.close()
+
+def update_sinking_fund_details(cat_name, target, due, note):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    # due date kann None oder String sein
+    c.execute("UPDATE categories SET target_amount = ?, due_date = ?, notes = ? WHERE name = ?", 
+              (target, due, note, cat_name))
     conn.commit()
     conn.close()
 
@@ -203,7 +218,6 @@ with sb_tab1:
             st.warning("Keine Kategorien!")
             category_input = st.text_input("Kategorie")
         else:
-            # Sortiere Dropdown alphabetisch
             category_input = st.selectbox("Kategorie", current_categories)
             
         desc_input = st.text_input("Info (Opt)")
@@ -279,9 +293,9 @@ with sb_tab3:
 
 st.sidebar.markdown("---")
 
-# KATEGORIE VERWALTUNG (ERWEITERT UM PRIO)
+# KATEGORIE VERWALTUNG
 with st.sidebar.expander("⚙️ Kategorien & Prioritäten"):
-    st.caption("Neue Kategorie anlegen")
+    st.caption("Neue Kategorie")
     c_new1, c_new2 = st.columns([2, 1])
     with c_new1: new_cat_name = st.text_input("Name", key="new_cat_input", label_visibility="collapsed", placeholder="Name")
     with c_new2: new_cat_prio = st.selectbox("Prio", PRIO_OPTIONS, index=3, label_visibility="collapsed", key="new_prio_select")
@@ -296,21 +310,16 @@ with st.sidebar.expander("⚙️ Kategorien & Prioritäten"):
     st.caption("Prio ändern / Löschen")
     edit_cat = st.selectbox("Kategorie wählen", current_categories, key="edit_cat_sel")
     if edit_cat:
-        # Aktuelle Prio holen
         curr_prio = current_cats_df[current_cats_df['name'] == edit_cat]['priority'].iloc[0]
-        # Falls in DB noch NULL steht (alte Einträge), auf Standard setzen
         if not curr_prio: curr_prio = "Standard"
-        
-        try:
-            prio_idx = PRIO_OPTIONS.index(curr_prio)
-        except:
-            prio_idx = 3 # Fallback Standard
+        try: prio_idx = PRIO_OPTIONS.index(curr_prio)
+        except: prio_idx = 3
             
         new_prio_edit = st.selectbox("Priorität ändern", PRIO_OPTIONS, index=prio_idx, key="edit_prio_sel")
         
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
-            if st.button("Prio Speichern"):
+            if st.button("Speichern"):
                 update_category_priority(edit_cat, new_prio_edit)
                 st.success("Gespeichert!")
                 st.rerun()
@@ -323,12 +332,12 @@ with st.sidebar.expander("⚙️ Kategorien & Prioritäten"):
 # --- HAUPTBEREICH ---
 df = load_data()
 
-if df.empty:
+if df.empty and not current_categories:
     st.info("Bitte erstelle erste Einträge in der Sidebar.")
 else:
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 Monatsübersicht", "📈 Verlauf", "📊 Trends", "⚖️ Vergleich", "📝 Editor"])
+    tab1, tab6, tab2, tab3, tab4, tab5 = st.tabs(["📅 Monatsübersicht", "🎯 Sinking Funds", "📈 Verlauf", "📊 Trends", "⚖️ Vergleich", "📝 Editor"])
 
-    # --- TAB 1: Monatsübersicht (SORTIERT NACH PRIO) ---
+    # --- TAB 1: Monatsübersicht ---
     with tab1:
         st.subheader("Details pro Monat")
         col_sel1, col_sel2 = st.columns([1, 2])
@@ -365,22 +374,21 @@ else:
             overview['Rest'] = overview['Gesamt Verfügbar'] - overview['Ausgaben (IST)']
             overview['Genutzt %'] = (overview['Ausgaben (IST)'] / overview['Gesamt Verfügbar'] * 100).fillna(0)
             
-            # --- NEU: Prio Merge & Sortierung ---
-            # Index ist Kategorie Name. Wir holen Prio dazu.
             overview = overview.merge(current_cats_df.set_index('name'), left_index=True, right_index=True, how='left')
             overview['priority'] = overview['priority'].fillna("Standard")
-            
-            # Sortieren: Erst Prio (A, B, C, S), dann Name
             overview = overview.sort_values(by=['priority', 'Gesamt Verfügbar'], ascending=[True, False])
             
+            # WICHTIG: Sinking Fund Infos für die Monatsübersicht ignorieren/verstecken, 
+            # damit sie nicht überladen wird. Wir zeigen sie im Extra Tab.
+            overview = overview.drop(columns=['target_amount', 'due_date', 'notes'], errors='ignore')
+
             if not overview.empty:
                 sum_row = overview.sum(numeric_only=True)
                 total_used, total_avail = sum_row['Ausgaben (IST)'], sum_row['Gesamt Verfügbar']
                 sum_row['Genutzt %'] = (total_used / total_avail * 100) if total_avail > 0 else 0
                 
-                # Summenzeile bauen
                 sum_df = pd.DataFrame(sum_row).T
-                sum_df['priority'] = "" # Keine Prio für Summe
+                sum_df['priority'] = ""
                 sum_df.index = ["∑ GESAMT"]
                 
                 c1, c2, c3, c4 = st.columns(4)
@@ -391,7 +399,6 @@ else:
                 
                 display_df = pd.concat([overview, sum_df])
                 
-                # Styling Funktion für Prio Spalte
                 def highlight_prio(val):
                     if "A -" in str(val): return 'color: #d90429; font-weight: bold'
                     if "B -" in str(val): return 'color: #e36414'
@@ -416,6 +423,159 @@ else:
             else: df_curr_filtered = pd.DataFrame()
             with st.expander("Einzelbuchungen (Gefiltert)"):
                 st.dataframe(df_curr_filtered[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
+
+    # --- TAB 6: SINKING FUNDS (NEU) ---
+    with tab6:
+        st.subheader("🎯 Sinking Funds Planung")
+        st.markdown("""
+        Hier verwaltest du deine Sparziele. Ändere **Zielbetrag**, **Fällig am** oder **Notizen** direkt in der Tabelle.
+        Die Sparrate wird automatisch berechnet.
+        """)
+        
+        # 1. Daten aggregieren (Aktueller Gesamtbestand pro Kategorie)
+        # Über alle Zeiten hinweg: SOLL - IST
+        soll_all = df[df['type'] == 'SOLL'].groupby('category')['amount'].sum()
+        ist_all = df[df['type'] == 'IST'].groupby('category')['amount'].sum()
+        current_balance = soll_all.subtract(ist_all, fill_value=0)
+        
+        # 2. Merge mit Kategorien-Daten (Prio, Ziel, Datum, Notiz)
+        sf_df = current_cats_df.copy().set_index('name')
+        sf_df['Aktuell'] = current_balance
+        sf_df['Aktuell'] = sf_df['Aktuell'].fillna(0.0)
+        
+        # 3. Berechnungs-Logik für Sparrate
+        today = date.today()
+        
+        def calc_savings_rate(row):
+            target = row['target_amount'] if pd.notnull(row['target_amount']) else 0
+            curr = row['Aktuell']
+            due_str = row['due_date']
+            
+            if target <= 0: return 0.0, "Kein Ziel"
+            if curr >= target: return 0.0, "✅ Ziel erreicht"
+            
+            missing = target - curr
+            
+            if not due_str: return 0.0, "Kein Datum"
+            
+            try:
+                due = datetime.datetime.strptime(due_str, "%Y-%m-%d").date()
+            except:
+                return 0.0, "Datum Fehler"
+            
+            if due <= today: return missing, "❗ Überfällig"
+            
+            # Monate berechnen (relativedelta ist genauer)
+            diff = relativedelta(due, today)
+            months_left = diff.years * 12 + diff.months
+            # Wenn es z.B. noch 15 Tage sind, zählen wir das als 1 Monat, sonst div/0
+            if months_left == 0: months_left = 1
+            
+            rate = missing / months_left
+            return rate, f"{months_left} Monate"
+
+        # Apply calculation
+        res = sf_df.apply(calc_savings_rate, axis=1, result_type='expand')
+        sf_df['Monatl. Rate'] = res[0]
+        sf_df['Status'] = res[1]
+        
+        # Fortschritt in %
+        sf_df['%'] = (sf_df['Aktuell'] / sf_df['target_amount'] * 100).fillna(0)
+        # Fix für div/0 oder keine targets
+        sf_df.loc[sf_df['target_amount'] <= 0, '%'] = 0
+        
+        # Anzeige vorbereiten
+        # Wir brauchen ein editierbares DF, aber wir wollen "Aktuell", "Rate", "Status", "%" nicht editierbar
+        # "target_amount", "due_date", "notes" sollen editierbar sein.
+        
+        # Sortierung
+        sf_df['priority'] = sf_df['priority'].fillna("Standard")
+        
+        # Hilfsfunktion zur Anzeige einer Prio-Gruppe
+        def show_prio_group(prio_label, color_code):
+            group_df = sf_df[sf_df['priority'] == prio_label].copy()
+            if not group_df.empty:
+                st.markdown(f"#### :{color_code}[{prio_label}]")
+                
+                # Konfiguration für den Editor
+                col_config = {
+                    "priority": None, # Verstecken, da durch Gruppe klar
+                    "Aktuell": st.column_config.NumberColumn("Ist-Stand", format="%.2f €", disabled=True),
+                    "target_amount": st.column_config.NumberColumn("Zielbetrag (€)", min_value=0, format="%.2f €", required=True),
+                    "due_date": st.column_config.DateColumn("Fällig am", format="DD.MM.YYYY"),
+                    "notes": st.column_config.TextColumn("Notizen"),
+                    "Monatl. Rate": st.column_config.NumberColumn("Sparrate / Monat", format="%.2f €", disabled=True, help="Notwendige Rate um Ziel bis Datum zu erreichen"),
+                    "Status": st.column_config.TextColumn("Zeitraum", disabled=True),
+                    "%": st.column_config.ProgressColumn("Fortschritt", min_value=0, max_value=100, format="%.0f%%"),
+                }
+                
+                # Reset Index damit Name eine Spalte ist
+                group_df = group_df.reset_index()
+                col_config["name"] = st.column_config.TextColumn("Kategorie", disabled=True)
+                
+                # Editor
+                edited_sf = st.data_editor(
+                    group_df,
+                    column_config=col_config,
+                    key=f"sf_editor_{prio_label}",
+                    hide_index=True,
+                    use_container_width=True,
+                    column_order=["name", "Aktuell", "target_amount", "due_date", "%", "Monatl. Rate", "Status", "notes"]
+                )
+                
+                # Check for changes
+                # Streamlit Data Editor gibt das geänderte DF zurück. Wir vergleichen es nicht komplex, 
+                # sondern triggern ein Update wenn der User was ändert (Session State Logic wäre besser, aber direct Check geht auch)
+                
+                # ACHTUNG: DataEditor ist tricky bei Updates.
+                # Wir iterieren über das Resultat und speichern Änderungen in der DB.
+                # Da wir nicht genau wissen, WAS geändert wurde, updaten wir einfach alle Zeilen dieser Gruppe bei Interaktion.
+                # Das ist bei SQLite und <100 Zeilen performant genug.
+                
+                # Wir vergleichen mit dem originalen group_df, um unnötige Writes zu vermeiden?
+                # Einfacher: Wir prüfen session_state des Editors
+                
+                # Der Key im Session State enthält die Änderungen
+                ss_key = f"sf_editor_{prio_label}"
+                if ss_key in st.session_state:
+                    changes = st.session_state[ss_key]
+                    if changes["edited_rows"]:
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        updated = False
+                        for idx, row_changes in changes["edited_rows"].items():
+                            # idx ist der Index im angezeigten DF (group_df)
+                            cat_name = group_df.iloc[idx]['name']
+                            
+                            # Bestehende Werte
+                            curr_target = group_df.iloc[idx]['target_amount']
+                            curr_due = group_df.iloc[idx]['due_date']
+                            curr_note = group_df.iloc[idx]['notes']
+                            
+                            # Neue Werte (Fallback auf alte, wenn nicht geändert)
+                            new_target = row_changes.get("target_amount", curr_target)
+                            new_due = row_changes.get("due_date", curr_due)
+                            new_note = row_changes.get("notes", curr_note)
+                            
+                            # Datum zu String konvertieren falls nötig
+                            if isinstance(new_due, (date, datetime.datetime)):
+                                new_due = new_due.strftime("%Y-%m-%d")
+                            
+                            c.execute("UPDATE categories SET target_amount = ?, due_date = ?, notes = ? WHERE name = ?", 
+                                      (new_target, new_due, new_note, cat_name))
+                            updated = True
+                        
+                        conn.commit()
+                        conn.close()
+                        if updated:
+                            st.rerun()
+
+        # Render Groups
+        show_prio_group("A - Hoch", "red")
+        show_prio_group("B - Mittel", "orange")
+        show_prio_group("C - Niedrig", "blue")
+        show_prio_group("Standard", "grey")
+
 
     # --- TAB 2-5 (Standard wie gehabt) ---
     with tab2:
