@@ -3,7 +3,7 @@ import pandas as pd
 import sqlite3
 import datetime
 from datetime import date, timedelta
-from dateutil.relativedelta import relativedelta # Neu für genauere Monatsberechnung
+from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
 
 # --- Konfiguration & Setup ---
@@ -54,8 +54,7 @@ def init_db():
         )
     ''')
     
-    # MIGRATION: Neue Spalten für Sinking Funds hinzufügen
-    # Wir prüfen einzeln, ob die Spalten existieren
+    # MIGRATION: Spalten prüfen
     try:
         c.execute("SELECT target_amount FROM categories LIMIT 1")
     except sqlite3.OperationalError:
@@ -71,8 +70,6 @@ def init_db():
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE categories ADD COLUMN notes TEXT")
         
-    conn.commit()
-    
     # Initiale Kategorien
     c.execute("SELECT count(*) FROM categories")
     if c.fetchone()[0] == 0:
@@ -109,15 +106,6 @@ def update_category_priority(cat_name, new_prio):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("UPDATE categories SET priority = ? WHERE name = ?", (new_prio, cat_name))
-    conn.commit()
-    conn.close()
-
-def update_sinking_fund_details(cat_name, target, due, note):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # due date kann None oder String sein
-    c.execute("UPDATE categories SET target_amount = ?, due_date = ?, notes = ? WHERE name = ?", 
-              (target, due, note, cat_name))
     conn.commit()
     conn.close()
 
@@ -378,8 +366,7 @@ else:
             overview['priority'] = overview['priority'].fillna("Standard")
             overview = overview.sort_values(by=['priority', 'Gesamt Verfügbar'], ascending=[True, False])
             
-            # WICHTIG: Sinking Fund Infos für die Monatsübersicht ignorieren/verstecken, 
-            # damit sie nicht überladen wird. Wir zeigen sie im Extra Tab.
+            # WICHTIG: Sinking Fund Infos für die Monatsübersicht ignorieren/verstecken
             overview = overview.drop(columns=['target_amount', 'due_date', 'notes'], errors='ignore')
 
             if not overview.empty:
@@ -424,142 +411,116 @@ else:
             with st.expander("Einzelbuchungen (Gefiltert)"):
                 st.dataframe(df_curr_filtered[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
 
-    # --- TAB 6: SINKING FUNDS (NEU) ---
+    # --- TAB 6: SINKING FUNDS (FIXED) ---
     with tab6:
         st.subheader("🎯 Sinking Funds Planung")
-        st.markdown("""
-        Hier verwaltest du deine Sparziele. Ändere **Zielbetrag**, **Fällig am** oder **Notizen** direkt in der Tabelle.
-        Die Sparrate wird automatisch berechnet.
-        """)
+        st.markdown("Verwalte hier deine Sparziele.")
         
-        # 1. Daten aggregieren (Aktueller Gesamtbestand pro Kategorie)
-        # Über alle Zeiten hinweg: SOLL - IST
         soll_all = df[df['type'] == 'SOLL'].groupby('category')['amount'].sum()
         ist_all = df[df['type'] == 'IST'].groupby('category')['amount'].sum()
         current_balance = soll_all.subtract(ist_all, fill_value=0)
         
-        # 2. Merge mit Kategorien-Daten (Prio, Ziel, Datum, Notiz)
         sf_df = current_cats_df.copy().set_index('name')
+        
+        # --- FIX: DATUM KONVERTIEREN ---
+        # Strings aus DB zu echten Timestamps konvertieren, damit DataEditor glücklich ist
+        sf_df['due_date'] = pd.to_datetime(sf_df['due_date'], errors='coerce')
+        # -------------------------------
+        
         sf_df['Aktuell'] = current_balance
         sf_df['Aktuell'] = sf_df['Aktuell'].fillna(0.0)
         
-        # 3. Berechnungs-Logik für Sparrate
         today = date.today()
         
         def calc_savings_rate(row):
             target = row['target_amount'] if pd.notnull(row['target_amount']) else 0
             curr = row['Aktuell']
-            due_str = row['due_date']
+            
+            # Jetzt ist due_date ein Timestamp/NaT, kein String mehr
+            due_val = row['due_date']
             
             if target <= 0: return 0.0, "Kein Ziel"
             if curr >= target: return 0.0, "✅ Ziel erreicht"
             
+            if pd.isnull(due_val): return 0.0, "Kein Datum"
+            
+            # Timestamp zu date object
+            if hasattr(due_val, "date"):
+                due = due_val.date()
+            else:
+                due = due_val
+
             missing = target - curr
-            
-            if not due_str: return 0.0, "Kein Datum"
-            
-            try:
-                due = datetime.datetime.strptime(due_str, "%Y-%m-%d").date()
-            except:
-                return 0.0, "Datum Fehler"
             
             if due <= today: return missing, "❗ Überfällig"
             
-            # Monate berechnen (relativedelta ist genauer)
             diff = relativedelta(due, today)
             months_left = diff.years * 12 + diff.months
-            # Wenn es z.B. noch 15 Tage sind, zählen wir das als 1 Monat, sonst div/0
             if months_left == 0: months_left = 1
             
             rate = missing / months_left
             return rate, f"{months_left} Monate"
 
-        # Apply calculation
         res = sf_df.apply(calc_savings_rate, axis=1, result_type='expand')
         sf_df['Monatl. Rate'] = res[0]
         sf_df['Status'] = res[1]
         
-        # Fortschritt in %
         sf_df['%'] = (sf_df['Aktuell'] / sf_df['target_amount'] * 100).fillna(0)
-        # Fix für div/0 oder keine targets
         sf_df.loc[sf_df['target_amount'] <= 0, '%'] = 0
         
-        # Anzeige vorbereiten
-        # Wir brauchen ein editierbares DF, aber wir wollen "Aktuell", "Rate", "Status", "%" nicht editierbar
-        # "target_amount", "due_date", "notes" sollen editierbar sein.
-        
-        # Sortierung
         sf_df['priority'] = sf_df['priority'].fillna("Standard")
         
-        # Hilfsfunktion zur Anzeige einer Prio-Gruppe
         def show_prio_group(prio_label, color_code):
             group_df = sf_df[sf_df['priority'] == prio_label].copy()
             if not group_df.empty:
                 st.markdown(f"#### :{color_code}[{prio_label}]")
-                
-                # Konfiguration für den Editor
                 col_config = {
-                    "priority": None, # Verstecken, da durch Gruppe klar
+                    "priority": None,
                     "Aktuell": st.column_config.NumberColumn("Ist-Stand", format="%.2f €", disabled=True),
                     "target_amount": st.column_config.NumberColumn("Zielbetrag (€)", min_value=0, format="%.2f €", required=True),
                     "due_date": st.column_config.DateColumn("Fällig am", format="DD.MM.YYYY"),
                     "notes": st.column_config.TextColumn("Notizen"),
-                    "Monatl. Rate": st.column_config.NumberColumn("Sparrate / Monat", format="%.2f €", disabled=True, help="Notwendige Rate um Ziel bis Datum zu erreichen"),
+                    "Monatl. Rate": st.column_config.NumberColumn("Sparrate / Monat", format="%.2f €", disabled=True),
                     "Status": st.column_config.TextColumn("Zeitraum", disabled=True),
                     "%": st.column_config.ProgressColumn("Fortschritt", min_value=0, max_value=100, format="%.0f%%"),
                 }
-                
-                # Reset Index damit Name eine Spalte ist
                 group_df = group_df.reset_index()
                 col_config["name"] = st.column_config.TextColumn("Kategorie", disabled=True)
                 
-                # Editor
+                # Editor Key muss unique sein
+                ed_key = f"sf_editor_{prio_label}"
                 edited_sf = st.data_editor(
                     group_df,
                     column_config=col_config,
-                    key=f"sf_editor_{prio_label}",
+                    key=ed_key,
                     hide_index=True,
                     use_container_width=True,
                     column_order=["name", "Aktuell", "target_amount", "due_date", "%", "Monatl. Rate", "Status", "notes"]
                 )
                 
-                # Check for changes
-                # Streamlit Data Editor gibt das geänderte DF zurück. Wir vergleichen es nicht komplex, 
-                # sondern triggern ein Update wenn der User was ändert (Session State Logic wäre besser, aber direct Check geht auch)
-                
-                # ACHTUNG: DataEditor ist tricky bei Updates.
-                # Wir iterieren über das Resultat und speichern Änderungen in der DB.
-                # Da wir nicht genau wissen, WAS geändert wurde, updaten wir einfach alle Zeilen dieser Gruppe bei Interaktion.
-                # Das ist bei SQLite und <100 Zeilen performant genug.
-                
-                # Wir vergleichen mit dem originalen group_df, um unnötige Writes zu vermeiden?
-                # Einfacher: Wir prüfen session_state des Editors
-                
-                # Der Key im Session State enthält die Änderungen
-                ss_key = f"sf_editor_{prio_label}"
-                if ss_key in st.session_state:
-                    changes = st.session_state[ss_key]
+                if ed_key in st.session_state:
+                    changes = st.session_state[ed_key]
                     if changes["edited_rows"]:
                         conn = sqlite3.connect(DB_FILE)
                         c = conn.cursor()
                         updated = False
                         for idx, row_changes in changes["edited_rows"].items():
-                            # idx ist der Index im angezeigten DF (group_df)
                             cat_name = group_df.iloc[idx]['name']
                             
-                            # Bestehende Werte
+                            # Originalwerte
                             curr_target = group_df.iloc[idx]['target_amount']
                             curr_due = group_df.iloc[idx]['due_date']
                             curr_note = group_df.iloc[idx]['notes']
                             
-                            # Neue Werte (Fallback auf alte, wenn nicht geändert)
                             new_target = row_changes.get("target_amount", curr_target)
                             new_due = row_changes.get("due_date", curr_due)
                             new_note = row_changes.get("notes", curr_note)
                             
-                            # Datum zu String konvertieren falls nötig
+                            # Konvertierung für DB (Timestamp -> String)
                             if isinstance(new_due, (date, datetime.datetime)):
                                 new_due = new_due.strftime("%Y-%m-%d")
+                            elif pd.isnull(new_due):
+                                new_due = None
                             
                             c.execute("UPDATE categories SET target_amount = ?, due_date = ?, notes = ? WHERE name = ?", 
                                       (new_target, new_due, new_note, cat_name))
@@ -570,14 +531,12 @@ else:
                         if updated:
                             st.rerun()
 
-        # Render Groups
         show_prio_group("A - Hoch", "red")
         show_prio_group("B - Mittel", "orange")
         show_prio_group("C - Niedrig", "blue")
         show_prio_group("Standard", "grey")
 
-
-    # --- TAB 2-5 (Standard wie gehabt) ---
+    # --- TAB 2-5 ---
     with tab2:
         st.subheader("📈 Verlauf")
         mode = st.radio("Modus", ["Monate (Tag 1-31)", "Jahre (Jan-Dez)", "Quartale"], horizontal=True)
