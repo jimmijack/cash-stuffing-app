@@ -575,6 +575,10 @@ else:
         
         df_edit = get_data("SELECT * FROM transactions ORDER BY date DESC, id DESC")
         
+        # FIX: Datumsspalte von String zu Datetime konvertieren, damit st.data_editor zufrieden ist
+        if not df_edit.empty:
+            df_edit['date'] = pd.to_datetime(df_edit['date'])
+        
         col_conf = {
             "id": st.column_config.NumberColumn("ID", disabled=True),
             "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
