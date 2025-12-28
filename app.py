@@ -42,34 +42,26 @@ def init_db():
             description TEXT,
             amount REAL,
             type TEXT,
-            budget_month TEXT
+            budget_month TEXT,
+            is_online INTEGER DEFAULT 0
         )
     ''')
     
+    # Migration Check (falls User von alter Version kommt)
+    try: c.execute("SELECT is_online FROM transactions LIMIT 1")
+    except: c.execute("ALTER TABLE transactions ADD COLUMN is_online INTEGER DEFAULT 0")
+
     # 2. Kategorien
     c.execute('''
         CREATE TABLE IF NOT EXISTS categories (
             name TEXT PRIMARY KEY,
-            priority TEXT DEFAULT 'Standard'
+            priority TEXT DEFAULT 'Standard',
+            target_amount REAL DEFAULT 0.0,
+            due_date TEXT,
+            notes TEXT
         )
     ''')
     
-    # MIGRATION: Spalten prüfen
-    try:
-        c.execute("SELECT target_amount FROM categories LIMIT 1")
-    except sqlite3.OperationalError:
-        c.execute("ALTER TABLE categories ADD COLUMN target_amount REAL DEFAULT 0.0")
-        
-    try:
-        c.execute("SELECT due_date FROM categories LIMIT 1")
-    except sqlite3.OperationalError:
-        c.execute("ALTER TABLE categories ADD COLUMN due_date TEXT")
-        
-    try:
-        c.execute("SELECT notes FROM categories LIMIT 1")
-    except sqlite3.OperationalError:
-        c.execute("ALTER TABLE categories ADD COLUMN notes TEXT")
-        
     # Initiale Kategorien
     c.execute("SELECT count(*) FROM categories")
     if c.fetchone()[0] == 0:
@@ -80,7 +72,6 @@ def init_db():
     conn.close()
 
 def get_categories_df():
-    """Lädt Kategorien inkl. aller Sinking Fund Daten"""
     conn = sqlite3.connect(DB_FILE)
     df = pd.read_sql_query("SELECT * FROM categories ORDER BY name ASC", conn)
     conn.close()
@@ -129,6 +120,7 @@ def load_data():
             df['Quartal'] = "Q" + df['date'].dt.quarter.astype(str) + " " + df['Jahr'].astype(str)
             
             df['budget_month'] = df['budget_month'].fillna(df['date'].dt.strftime('%Y-%m'))
+            df['is_online'] = df['is_online'].fillna(0).astype(int)
             
             def get_analysis_month(row):
                 if row['type'] == 'SOLL':
@@ -158,19 +150,25 @@ def load_data():
     except Exception as e:
         return pd.DataFrame()
 
-def save_transaction(dt, cat, desc, amt, typ, budget_mon=None):
+def save_transaction(dt, cat, desc, amt, typ, budget_mon=None, is_online=0):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     if not budget_mon:
         budget_mon = dt.strftime("%Y-%m")
-    c.execute("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?, ?, ?, ?, ?, ?)",
-              (dt, cat, desc, amt, typ, budget_mon))
+    online_int = 1 if is_online else 0
+    c.execute("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (dt, cat, desc, amt, typ, budget_mon, online_int))
     conn.commit()
     conn.close()
 
 def perform_transfer(date_val, cat_from, cat_to, amount):
     save_transaction(date_val, cat_from, f"Umbuchung zu {cat_to}", -amount, "SOLL", date_val.strftime("%Y-%m"))
     save_transaction(date_val, cat_to, f"Umbuchung von {cat_from}", amount, "SOLL", date_val.strftime("%Y-%m"))
+
+def perform_bank_deposit(date_val, amount):
+    # Spezieller Typ für Bankeinzahlung
+    # Kategorie ist fix "Back to Bank"
+    save_transaction(date_val, "Back to Bank", "Einzahlung auf Konto", amount, "BANK_DEPOSIT", date_val.strftime("%Y-%m"))
 
 # Initialisierung
 try:
@@ -182,7 +180,8 @@ except Exception as e:
 st.title("💶 Mein Cash Stuffing Planer")
 
 # --- SIDEBAR ---
-sb_tab1, sb_tab2, sb_tab3 = st.sidebar.tabs(["📝 Einzeln", "💰 Verteiler", "💸 Umbuchung"])
+# Jetzt 4 Tabs
+sb_tab1, sb_tab2, sb_tab3, sb_tab4 = st.sidebar.tabs(["📝 Einzeln", "💰 Verteiler", "💸 Umbuchung", "🏦 Bank"])
 current_cats_df = get_categories_df()
 current_categories = current_cats_df['name'].tolist()
 
@@ -211,9 +210,13 @@ with sb_tab1:
         desc_input = st.text_input("Info (Opt)")
         amount_input = st.number_input("Betrag (€)", min_value=0.0, format="%.2f")
         
+        is_online_input = False
+        if "IST" in type_input:
+            is_online_input = st.checkbox("💳 Online / Karte bezahlt?", help="Haken setzen, wenn Geld vom Konto ging.")
+        
         if st.form_submit_button("Speichern"):
             db_type = "SOLL" if "SOLL" in type_input else "IST"
-            save_transaction(date_input, category_input, desc_input, amount_input, db_type, budget_target)
+            save_transaction(date_input, category_input, desc_input, amount_input, db_type, budget_target, is_online_input)
             st.success("Gespeichert!")
             st.rerun()
 
@@ -279,6 +282,46 @@ with sb_tab3:
                     st.rerun()
         else: st.warning("Zu wenig Kategorien.")
 
+# TAB 4: BACK TO BANK (NEU)
+with sb_tab4:
+    st.write("🏦 Back to Bank")
+    st.caption("Verwalte den Umschlag für Online-Zahlungen.")
+    
+    # Daten für Berechnung laden (Alle Zeiten)
+    # Wir brauchen df (wird unten geladen, aber wir machen hier eine schnelle Query für die Sidebar Performance)
+    # Oder wir nutzen df von unten, aber Streamlit läuft script-based von oben nach unten.
+    # Wir machen eine kleine Query:
+    conn = sqlite3.connect(DB_FILE)
+    
+    # 1. Summe aller Online Ausgaben (IST & is_online=1)
+    online_sum = pd.read_sql_query("SELECT SUM(amount) FROM transactions WHERE type='IST' AND is_online=1", conn).iloc[0,0]
+    if not online_sum: online_sum = 0.0
+    
+    # 2. Summe aller Einzahlungen (BANK_DEPOSIT)
+    deposit_sum = pd.read_sql_query("SELECT SUM(amount) FROM transactions WHERE type='BANK_DEPOSIT'", conn).iloc[0,0]
+    if not deposit_sum: deposit_sum = 0.0
+    conn.close()
+    
+    b2b_balance = online_sum - deposit_sum
+    
+    # Anzeige
+    st.metric("Im Umschlag", format_euro(b2b_balance))
+    
+    if b2b_balance > 0.01:
+        st.write("Geld am Automaten eingezahlt?")
+        with st.form("deposit_form"):
+            dep_date = st.date_input("Datum", date.today())
+            dep_amount = st.number_input("Betrag", value=b2b_balance, min_value=0.0, max_value=b2b_balance, format="%.2f")
+            if st.form_submit_button("Einzahlung buchen"):
+                perform_bank_deposit(dep_date, dep_amount)
+                st.success("Gebucht!")
+                st.rerun()
+    elif b2b_balance < -0.01:
+        st.error("Negativer Betrag! Du hast mehr eingezahlt als online ausgegeben.")
+    else:
+        st.info("Umschlag ist leer. Alles ausgeglichen.")
+
+
 st.sidebar.markdown("---")
 
 # KATEGORIE VERWALTUNG
@@ -339,8 +382,10 @@ else:
             
             current_sort_key = month_options[month_options['Analyse_Monat'] == selected_month_label]['sort_key_month'].iloc[0]
             
-            df_curr = df[df['sort_key_month'] == current_sort_key].copy()
-            df_prev = df[df['sort_key_month'] < current_sort_key].copy()
+            # WICHTIG: BANK_DEPOSIT aus der normalen Übersicht filtern, sonst tauchen sie als Ausgaben/Budgets auf
+            # Wir wollen hier nur SOLL und IST sehen
+            df_curr = df[(df['sort_key_month'] == current_sort_key) & (df['type'].isin(['SOLL', 'IST']))].copy()
+            df_prev = df[(df['sort_key_month'] < current_sort_key) & (df['type'].isin(['SOLL', 'IST']))].copy()
             
             prev_soll = df_prev[df_prev['type'] == 'SOLL'].groupby('category')['amount'].sum()
             prev_ist = df_prev[df_prev['type'] == 'IST'].groupby('category')['amount'].sum()
@@ -366,7 +411,6 @@ else:
             overview['priority'] = overview['priority'].fillna("Standard")
             overview = overview.sort_values(by=['priority', 'Gesamt Verfügbar'], ascending=[True, False])
             
-            # WICHTIG: Sinking Fund Infos für die Monatsübersicht ignorieren/verstecken
             overview = overview.drop(columns=['target_amount', 'due_date', 'notes'], errors='ignore')
 
             if not overview.empty:
@@ -378,12 +422,38 @@ else:
                 sum_df['priority'] = ""
                 sum_df.index = ["∑ GESAMT"]
                 
+                # B2B Berechnung in der Sidebar gemacht, hier zeigen wir nur Warnung wenn Umschlag voll
+                # Wir holen den Wert erneut für die Visualisierung
+                # (Einfacher: Wir nutzen die Sidebar Berechnung, aber die Variable ist dort lokal)
+                # Wir berechnen es nochmal kurz globaler:
+                
+                # Wir zeigen in der Info Box einfach den aktuellen B2B Stand (Global)
+                # Aber Achtung: Das Dashboard zeigt einen ausgewählten Monat.
+                # Der B2B Umschlag ist aber zeitunabhängig (ein Topf).
+                # Wir zeigen daher: "In diesem Monat online ausgegeben: X €" UND "Aktuell im Umschlag: Y €"
+                
+                if sel_categories:
+                     month_online = df_curr[(df_curr['type'] == 'IST') & (df_curr['is_online'] == 1) & (df_curr['category'].isin(sel_categories))]['amount'].sum()
+                else:
+                     month_online = df_curr[(df_curr['type'] == 'IST') & (df_curr['is_online'] == 1)]['amount'].sum()
+                
+                # Globaler B2B Stand (Wiederholung der Sidebar Logik für Anzeige hier)
+                all_online_sum = df[(df['type']=='IST') & (df['is_online']==1)]['amount'].sum()
+                all_dep_sum = df[df['type']=='BANK_DEPOSIT']['amount'].sum()
+                global_b2b = all_online_sum - all_dep_sum
+
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Übertrag (Alt)", format_euro(sum_row['Übertrag Vormonat']))
                 c2.metric("Frisches Budget", format_euro(sum_row['Budget (Neu)']))
                 c3.metric("Ausgaben", format_euro(sum_row['Ausgaben (IST)']))
                 c4.metric("Aktueller Rest", format_euro(sum_row['Rest']), delta_color="normal")
                 
+                # INFO BOX
+                if global_b2b > 0:
+                    st.info(f"💳 **Back to Bank:** Du hast diesen Monat **{format_euro(month_online)}** online bezahlt. \n\n **Aktueller Umschlag-Inhalt (Gesamt):** {format_euro(global_b2b)} (siehe Sidebar 'Bank').")
+                else:
+                    st.success("Back to Bank Umschlag ist leer/ausgeglichen.")
+
                 display_df = pd.concat([overview, sum_df])
                 
                 def highlight_prio(val):
@@ -409,24 +479,24 @@ else:
             if sel_categories: df_curr_filtered = df_curr[df_curr['category'].isin(sel_categories)]
             else: df_curr_filtered = pd.DataFrame()
             with st.expander("Einzelbuchungen (Gefiltert)"):
-                st.dataframe(df_curr_filtered[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
+                if not df_curr_filtered.empty:
+                    df_curr_filtered['Art'] = df_curr_filtered['is_online'].apply(lambda x: "💳 Online" if x==1 else "💵 Bar")
+                    st.dataframe(df_curr_filtered[['date', 'Art', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
 
-    # --- TAB 6: SINKING FUNDS (FIXED) ---
+    # --- TAB 6: SINKING FUNDS ---
     with tab6:
         st.subheader("🎯 Sinking Funds Planung")
         st.markdown("Verwalte hier deine Sparziele.")
         
-        soll_all = df[df['type'] == 'SOLL'].groupby('category')['amount'].sum()
-        ist_all = df[df['type'] == 'IST'].groupby('category')['amount'].sum()
+        # Sinking Funds sollen auch nur SOLL und IST beachten, keine Bank Deposits
+        df_sf_calc = df[df['type'].isin(['SOLL', 'IST'])].copy()
+        
+        soll_all = df_sf_calc[df_sf_calc['type'] == 'SOLL'].groupby('category')['amount'].sum()
+        ist_all = df_sf_calc[df_sf_calc['type'] == 'IST'].groupby('category')['amount'].sum()
         current_balance = soll_all.subtract(ist_all, fill_value=0)
         
         sf_df = current_cats_df.copy().set_index('name')
-        
-        # --- FIX: DATUM KONVERTIEREN ---
-        # Strings aus DB zu echten Timestamps konvertieren, damit DataEditor glücklich ist
         sf_df['due_date'] = pd.to_datetime(sf_df['due_date'], errors='coerce')
-        # -------------------------------
-        
         sf_df['Aktuell'] = current_balance
         sf_df['Aktuell'] = sf_df['Aktuell'].fillna(0.0)
         
@@ -435,29 +505,21 @@ else:
         def calc_savings_rate(row):
             target = row['target_amount'] if pd.notnull(row['target_amount']) else 0
             curr = row['Aktuell']
-            
-            # Jetzt ist due_date ein Timestamp/NaT, kein String mehr
             due_val = row['due_date']
             
             if target <= 0: return 0.0, "Kein Ziel"
             if curr >= target: return 0.0, "✅ Ziel erreicht"
             
             if pd.isnull(due_val): return 0.0, "Kein Datum"
-            
-            # Timestamp zu date object
-            if hasattr(due_val, "date"):
-                due = due_val.date()
-            else:
-                due = due_val
+            if hasattr(due_val, "date"): due = due_val.date()
+            else: due = due_val
 
             missing = target - curr
-            
             if due <= today: return missing, "❗ Überfällig"
             
             diff = relativedelta(due, today)
             months_left = diff.years * 12 + diff.months
             if months_left == 0: months_left = 1
-            
             rate = missing / months_left
             return rate, f"{months_left} Monate"
 
@@ -487,7 +549,6 @@ else:
                 group_df = group_df.reset_index()
                 col_config["name"] = st.column_config.TextColumn("Kategorie", disabled=True)
                 
-                # Editor Key muss unique sein
                 ed_key = f"sf_editor_{prio_label}"
                 edited_sf = st.data_editor(
                     group_df,
@@ -506,30 +567,22 @@ else:
                         updated = False
                         for idx, row_changes in changes["edited_rows"].items():
                             cat_name = group_df.iloc[idx]['name']
-                            
-                            # Originalwerte
                             curr_target = group_df.iloc[idx]['target_amount']
                             curr_due = group_df.iloc[idx]['due_date']
                             curr_note = group_df.iloc[idx]['notes']
-                            
                             new_target = row_changes.get("target_amount", curr_target)
                             new_due = row_changes.get("due_date", curr_due)
                             new_note = row_changes.get("notes", curr_note)
-                            
-                            # Konvertierung für DB (Timestamp -> String)
                             if isinstance(new_due, (date, datetime.datetime)):
                                 new_due = new_due.strftime("%Y-%m-%d")
                             elif pd.isnull(new_due):
                                 new_due = None
-                            
                             c.execute("UPDATE categories SET target_amount = ?, due_date = ?, notes = ? WHERE name = ?", 
                                       (new_target, new_due, new_note, cat_name))
                             updated = True
-                        
                         conn.commit()
                         conn.close()
-                        if updated:
-                            st.rerun()
+                        if updated: st.rerun()
 
         show_prio_group("A - Hoch", "red")
         show_prio_group("B - Mittel", "orange")
@@ -537,16 +590,19 @@ else:
         show_prio_group("Standard", "grey")
 
     # --- TAB 2-5 ---
+    # Hier filtern wir auch BANK_DEPOSIT raus, damit es Charts nicht verfälscht
+    df_charts = df[df['type'].isin(['SOLL', 'IST'])].copy()
+
     with tab2:
         st.subheader("📈 Verlauf")
         mode = st.radio("Modus", ["Monate (Tag 1-31)", "Jahre (Jan-Dez)", "Quartale"], horizontal=True)
         cat_options = ["Alle"] + sorted(current_categories)
         sel_cat = st.selectbox("Kategorie", cat_options)
-        df_c = df[df['type'] == 'IST'].copy()
+        df_c = df_charts[df_charts['type'] == 'IST'].copy()
         if sel_cat != "Alle": df_c = df_c[df_c['category'] == sel_cat]
         x_vals, y_a, y_b, n_a, n_b = [], [], [], "", ""
         if "Monate" in mode:
-            opts = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
+            opts = df_charts[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
             all_m = opts['Analyse_Monat'].unique()
             if len(all_m) >= 1:
                 c1, c2 = st.columns(2)
@@ -558,7 +614,7 @@ else:
                 y_a, y_b = get_d(df_c, n_a), get_d(df_c, n_b)
                 x_vals = list(range(1, 32))
         elif "Jahre" in mode:
-            ys = sorted(df['Jahr'].unique())
+            ys = sorted(df_charts['Jahr'].unique())
             if ys:
                 idx = len(ys)-1
                 c1, c2 = st.columns(2)
@@ -570,7 +626,7 @@ else:
                 x_vals = [DE_MONTHS[i] for i in range(1,13)]
                 n_a, n_b = str(n_a), str(n_b)
         else:
-            qs = sorted(df['Quartal'].unique(), reverse=True)
+            qs = sorted(df_charts['Quartal'].unique(), reverse=True)
             if qs:
                 c1, c2 = st.columns(2)
                 with c1: n_a = st.selectbox("A", qs, index=0)
@@ -594,12 +650,12 @@ else:
         st.subheader("Balken-Übersicht")
         vm = st.radio("Ansicht", ["Monatlich", "Quartalsweise", "Jährlich"], horizontal=True, key="tr_rad")
         if vm == "Monatlich":
-            agg = df.groupby(['sort_key_month', 'Analyse_Monat', 'type'])['amount'].sum().unstack(fill_value=0)
+            agg = df_charts.groupby(['sort_key_month', 'Analyse_Monat', 'type'])['amount'].sum().unstack(fill_value=0)
             agg = agg.reset_index().sort_values('sort_key_month').set_index('Analyse_Monat')
             cols = [c for c in ['SOLL', 'IST'] if c in agg.columns]
             st.bar_chart(agg[cols])
-        elif vm == "Quartalsweise": st.bar_chart(df.groupby(['Quartal', 'type'])['amount'].sum().unstack(fill_value=0))
-        else: st.bar_chart(df.groupby(['Jahr', 'type'])['amount'].sum().unstack(fill_value=0))
+        elif vm == "Quartalsweise": st.bar_chart(df_charts.groupby(['Quartal', 'type'])['amount'].sum().unstack(fill_value=0))
+        else: st.bar_chart(df_charts.groupby(['Jahr', 'type'])['amount'].sum().unstack(fill_value=0))
 
     with tab4:
         st.subheader("📊 Periodenvergleich")
@@ -611,9 +667,9 @@ else:
             if p1 and p2:
                 def fp(sel):
                     t, v = sel.split(": ")
-                    if t=="M": return df[df['Analyse_Monat']==v]
-                    if t=="Q": return df[df['Quartal']==v]
-                    if t=="J": return df[df['Jahr'].astype(str)==v]
+                    if t=="M": return df_charts[df_charts['Analyse_Monat']==v]
+                    if t=="Q": return df_charts[df_charts['Quartal']==v]
+                    if t=="J": return df_charts[df_charts['Jahr'].astype(str)==v]
                     return pd.DataFrame()
                 d_a, d_b = fp(p1), fp(p2)
                 if not d_a.empty and not d_b.empty:
@@ -624,14 +680,16 @@ else:
 
     with tab5:
         st.subheader("📝 Daten korrigieren")
+        # Im Editor zeigen wir ALLES, auch BANK_DEPOSIT, damit man es korrigieren kann
         df_ed = df.sort_values(by=['date', 'id'], ascending=[False, False]).copy()
         col_conf = {
             "id": st.column_config.NumberColumn("ID", disabled=True),
             "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
-            "category": st.column_config.SelectboxColumn("Kategorie", options=current_categories, required=True),
-            "type": st.column_config.SelectboxColumn("Typ", options=["SOLL", "IST"], required=True),
+            "category": st.column_config.SelectboxColumn("Kategorie", options=current_categories + ["Back to Bank"], required=True),
+            "type": st.column_config.SelectboxColumn("Typ", options=["SOLL", "IST", "BANK_DEPOSIT"], required=True),
             "amount": st.column_config.NumberColumn("Betrag (€)", format="%.2f €", min_value=0),
             "budget_month": st.column_config.TextColumn("Budget Monat (YYYY-MM)"),
+            "is_online": st.column_config.CheckboxColumn("Online/Karte?", default=False),
             "description": st.column_config.TextColumn("Info"),
             "Analyse_Monat": None, "Monat_Name": None, "Monat_Num": None, "Jahr": None, "Quartal": None, "sort_key_month": None
         }
@@ -661,8 +719,9 @@ else:
                     bm = r.get("budget_month", None)
                     if not bm and isinstance(dt, (date, datetime.datetime)): bm = dt.strftime("%Y-%m")
                     elif not bm: bm = date.today().strftime("%Y-%m")
-                    c.execute("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?, ?, ?, ?, ?, ?)",
-                              (dt, r.get("category", "Sonstiges"), r.get("description", ""), r.get("amount", 0.0), r.get("type", "IST"), bm))
+                    online_val = 1 if r.get("is_online", False) else 0
+                    c.execute("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (dt, r.get("category", "Sonstiges"), r.get("description", ""), r.get("amount", 0.0), r.get("type", "IST"), bm, online_val))
                 mod = True
             conn.commit()
             conn.close()
