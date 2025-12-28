@@ -68,9 +68,22 @@ def get_data(query, params=()):
 def execute_db(query, params=()):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute(query, params)
-    conn.commit()
+    try:
+        c.execute(query, params)
+        conn.commit()
+        res = True
+    except Exception as e:
+        res = False
     conn.close()
+    return res
+
+# --- Fehlende Funktionen wieder hinzugefügt ---
+def add_category_to_db(new_cat, prio, is_fixed=0):
+    return execute_db("INSERT INTO categories (name, priority, is_fixed) VALUES (?, ?, ?)", (new_cat, prio, is_fixed))
+
+def delete_category_from_db(cat_to_del):
+    return execute_db("DELETE FROM categories WHERE name = ?", (cat_to_del,))
+# -----------------------------------------------
 
 def load_main_data():
     df = get_data("SELECT * FROM transactions")
