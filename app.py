@@ -23,6 +23,8 @@ DEFAULT_CATEGORIES = [
     "Sonstiges", "Fixkosten", "Kleidung", "Geschenke", "Notgroschen"
 ]
 
+PRIO_OPTIONS = ["A - Hoch", "B - Mittel", "C - Niedrig", "Standard"]
+
 def format_euro(val):
     return "{:,.2f} €".format(val).replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -30,7 +32,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # 1. Transaktionen Tabelle
+    # 1. Transaktionen
     c.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +44,7 @@ def init_db():
         )
     ''')
     
-    # 2. Migration: Neue Spalte 'budget_month' hinzufügen
+    # Migration Budget Month
     try:
         c.execute("SELECT budget_month FROM transactions LIMIT 1")
     except sqlite3.OperationalError:
@@ -50,37 +52,59 @@ def init_db():
         c.execute("UPDATE transactions SET budget_month = strftime('%Y-%m', date) WHERE budget_month IS NULL")
         conn.commit()
 
-    # 3. Kategorien Tabelle
+    # 2. Kategorien
     c.execute('''
         CREATE TABLE IF NOT EXISTS categories (
             name TEXT PRIMARY KEY
         )
     ''')
+    
+    # Migration: Priority Spalte hinzufügen
+    try:
+        c.execute("SELECT priority FROM categories LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE categories ADD COLUMN priority TEXT DEFAULT 'Standard'")
+        conn.commit()
+
+    # Initiale Kategorien
     c.execute("SELECT count(*) FROM categories")
     if c.fetchone()[0] == 0:
         for cat in DEFAULT_CATEGORIES:
-            c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
+            # Wichtige Dinge Standardmäßig auf A setzen? Hier erst mal alles Standard
+            c.execute("INSERT OR IGNORE INTO categories (name, priority) VALUES (?, ?)", (cat, "Standard"))
             
     conn.commit()
     conn.close()
 
-def get_categories():
+def get_categories_df():
+    """Lädt Kategorien inkl. Priorität als DataFrame"""
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT name FROM categories ORDER BY name ASC", conn)
+    df = pd.read_sql_query("SELECT name, priority FROM categories ORDER BY name ASC", conn)
     conn.close()
+    return df
+
+def get_categories_list():
+    df = get_categories_df()
     return df['name'].tolist()
 
-def add_category_to_db(new_cat):
+def add_category_to_db(new_cat, prio):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
-        c.execute("INSERT INTO categories (name) VALUES (?)", (new_cat,))
+        c.execute("INSERT INTO categories (name, priority) VALUES (?, ?)", (new_cat, prio))
         conn.commit()
         success = True
     except sqlite3.IntegrityError:
         success = False
     conn.close()
     return success
+
+def update_category_priority(cat_name, new_prio):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE categories SET priority = ? WHERE name = ?", (new_prio, cat_name))
+    conn.commit()
+    conn.close()
 
 def delete_category_from_db(cat_to_del):
     conn = sqlite3.connect(DB_FILE)
@@ -155,18 +179,17 @@ except Exception as e:
 st.title("💶 Mein Cash Stuffing Planer")
 
 # --- SIDEBAR ---
-# Jetzt 3 Tabs
 sb_tab1, sb_tab2, sb_tab3 = st.sidebar.tabs(["📝 Einzeln", "💰 Verteiler", "💸 Umbuchung"])
-current_categories = get_categories()
+current_cats_df = get_categories_df()
+current_categories = current_cats_df['name'].tolist()
 
 # TAB 1: EINZEL BUCHUNG
 with sb_tab1:
     with st.form("entry_form", clear_on_submit=True):
         date_input = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
-        type_input = st.selectbox("Typ", ["IST (Ausgabe)", "SOLL (Budget einzahlen)"]) # Reihenfolge getauscht für schnelleres Eingeben von Ausgaben
+        type_input = st.selectbox("Typ", ["IST (Ausgabe)", "SOLL (Budget einzahlen)"])
         
         budget_target = None
-        # Budget Logik
         if "SOLL" in type_input:
             st.caption("Ziel-Monat:")
             today = date.today()
@@ -180,6 +203,7 @@ with sb_tab1:
             st.warning("Keine Kategorien!")
             category_input = st.text_input("Kategorie")
         else:
+            # Sortiere Dropdown alphabetisch
             category_input = st.selectbox("Kategorie", current_categories)
             
         desc_input = st.text_input("Info (Opt)")
@@ -191,80 +215,48 @@ with sb_tab1:
             st.success("Gespeichert!")
             st.rerun()
 
-# TAB 2: BULK VERTEILER (NEU!)
+# TAB 2: BULK VERTEILER
 with sb_tab2:
-    st.write("Verteile eine Gesamtsumme auf deine Umschläge.")
-    
-    # 1. Datum und Monat wählen
+    st.write("Budget Verteiler")
     bulk_date = st.date_input("Datum", date.today(), format="DD.MM.YYYY", key="bulk_date")
-    
     today = date.today()
     this_lbl = f"{DE_MONTHS[today.month]} {today.year}"
     next_m = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
     next_lbl = f"{DE_MONTHS[next_m.month]} {next_m.year}"
-    
     bulk_choice = st.radio("Für Monat:", [this_lbl, next_lbl], horizontal=True, key="bulk_month_choice")
     bulk_target_month = today.strftime("%Y-%m") if bulk_choice == this_lbl else next_m.strftime("%Y-%m")
     
-    st.caption("Trage unten die Beträge ein. Die Summe wird live berechnet.")
-    
-    # 2. Data Editor für schnelle Eingabe
-    if "bulk_df" not in st.session_state:
-        # Initialer DataFrame
+    if "bulk_df" not in st.session_state or len(st.session_state.bulk_df) != len(current_categories):
         st.session_state.bulk_df = pd.DataFrame({
             "Kategorie": current_categories,
             "Betrag": [0.0] * len(current_categories)
         })
-    else:
-        # Prüfen ob Kategorien sich geändert haben, dann updaten
-        if len(st.session_state.bulk_df) != len(current_categories):
-             st.session_state.bulk_df = pd.DataFrame({
-                "Kategorie": current_categories,
-                "Betrag": [0.0] * len(current_categories)
-            })
 
-    # Konfiguration für Editor
     col_cfg = {
         "Kategorie": st.column_config.TextColumn("Kategorie", disabled=True),
         "Betrag": st.column_config.NumberColumn("Betrag (€)", min_value=0, format="%.2f €")
     }
     
-    edited_bulk = st.data_editor(
-        st.session_state.bulk_df, 
-        column_config=col_cfg, 
-        hide_index=True, 
-        use_container_width=True,
-        key="bulk_editor",
-        num_rows="fixed"
-    )
+    edited_bulk = st.data_editor(st.session_state.bulk_df, column_config=col_cfg, hide_index=True, use_container_width=True, key="bulk_editor", num_rows="fixed")
     
-    # 3. Live Summe
     total_bulk = edited_bulk["Betrag"].sum()
-    st.metric("Gesamtsumme", format_euro(total_bulk))
+    st.metric("Summe", format_euro(total_bulk))
     
-    # 4. Speichern Button
-    if st.button("Budgets buchen"):
-        if total_bulk == 0:
-            st.warning("Summe ist 0.")
+    if st.button("Buchen"):
+        if total_bulk == 0: st.warning("Summe ist 0.")
         else:
-            count = 0
+            c = 0
             for index, row in edited_bulk.iterrows():
                 if row["Betrag"] > 0:
                     save_transaction(bulk_date, row["Kategorie"], "Budget Verteiler", row["Betrag"], "SOLL", bulk_target_month)
-                    count += 1
-            
-            # Reset der Tabelle nach Speichern
-            st.session_state.bulk_df = pd.DataFrame({
-                "Kategorie": current_categories,
-                "Betrag": [0.0] * len(current_categories)
-            })
-            st.success(f"{count} Budgets ({format_euro(total_bulk)}) für {bulk_choice} angelegt!")
+                    c += 1
+            st.session_state.bulk_df = pd.DataFrame({"Kategorie": current_categories, "Betrag": [0.0]*len(current_categories)})
+            st.success(f"{c} Budgets gebucht!")
             st.rerun()
-
 
 # TAB 3: UMBUCHUNG
 with sb_tab3:
-    st.write("Verschiebe Geld.")
+    st.write("Umbuchung")
     with st.form("transfer_form", clear_on_submit=True):
         t_date = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
         if len(current_categories) >= 2:
@@ -274,38 +266,59 @@ with sb_tab3:
             for i, c in enumerate(current_categories):
                 if "Spar" in c or "Notgroschen" in c:
                     if c != cat_from:
-                        def_idx = i
-                        break
+                        def_idx = i; break
             cat_to = c2.selectbox("Nach", current_categories, index=def_idx)
             t_amt = st.number_input("Betrag", min_value=0.0, format="%.2f", key="t_amt")
-            
             if st.form_submit_button("Umbuchen"):
-                if cat_from == cat_to:
-                    st.error("Identische Kategorien.")
+                if cat_from == cat_to: st.error("Identisch.")
                 else:
                     perform_transfer(t_date, cat_from, cat_to, t_amt)
                     st.success("Erledigt.")
                     st.rerun()
-        else:
-            st.warning("Zu wenig Kategorien.")
+        else: st.warning("Zu wenig Kategorien.")
 
 st.sidebar.markdown("---")
-with st.sidebar.expander("⚙️ Kategorien verwalten"):
-    new_cat_name = st.text_input("Neu:", key="new_cat_input")
+
+# KATEGORIE VERWALTUNG (ERWEITERT UM PRIO)
+with st.sidebar.expander("⚙️ Kategorien & Prioritäten"):
+    st.caption("Neue Kategorie anlegen")
+    c_new1, c_new2 = st.columns([2, 1])
+    with c_new1: new_cat_name = st.text_input("Name", key="new_cat_input", label_visibility="collapsed", placeholder="Name")
+    with c_new2: new_cat_prio = st.selectbox("Prio", PRIO_OPTIONS, index=3, label_visibility="collapsed", key="new_prio_select")
+    
     if st.button("Hinzufügen"):
         if new_cat_name:
-            if add_category_to_db(new_cat_name):
-                # Cache invalidieren für Bulk Editor
+            if add_category_to_db(new_cat_name, new_cat_prio):
                 if "bulk_df" in st.session_state: del st.session_state.bulk_df
                 st.rerun()
+    
     st.markdown("---")
-    del_cat_name = st.selectbox("Löschen:", current_categories, key="del_cat_select") if current_categories else None
-    if st.button("Entfernen"):
-        if del_cat_name:
-            delete_category_from_db(del_cat_name)
-            # Cache invalidieren
-            if "bulk_df" in st.session_state: del st.session_state.bulk_df
-            st.rerun()
+    st.caption("Prio ändern / Löschen")
+    edit_cat = st.selectbox("Kategorie wählen", current_categories, key="edit_cat_sel")
+    if edit_cat:
+        # Aktuelle Prio holen
+        curr_prio = current_cats_df[current_cats_df['name'] == edit_cat]['priority'].iloc[0]
+        # Falls in DB noch NULL steht (alte Einträge), auf Standard setzen
+        if not curr_prio: curr_prio = "Standard"
+        
+        try:
+            prio_idx = PRIO_OPTIONS.index(curr_prio)
+        except:
+            prio_idx = 3 # Fallback Standard
+            
+        new_prio_edit = st.selectbox("Priorität ändern", PRIO_OPTIONS, index=prio_idx, key="edit_prio_sel")
+        
+        c_btn1, c_btn2 = st.columns(2)
+        with c_btn1:
+            if st.button("Prio Speichern"):
+                update_category_priority(edit_cat, new_prio_edit)
+                st.success("Gespeichert!")
+                st.rerun()
+        with c_btn2:
+            if st.button("🗑 Löschen", type="primary"):
+                delete_category_from_db(edit_cat)
+                if "bulk_df" in st.session_state: del st.session_state.bulk_df
+                st.rerun()
 
 # --- HAUPTBEREICH ---
 df = load_data()
@@ -315,7 +328,7 @@ if df.empty:
 else:
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 Monatsübersicht", "📈 Verlauf", "📊 Trends", "⚖️ Vergleich", "📝 Editor"])
 
-    # --- TAB 1: Monatsübersicht ---
+    # --- TAB 1: Monatsübersicht (SORTIERT NACH PRIO) ---
     with tab1:
         st.subheader("Details pro Monat")
         col_sel1, col_sel2 = st.columns([1, 2])
@@ -352,11 +365,22 @@ else:
             overview['Rest'] = overview['Gesamt Verfügbar'] - overview['Ausgaben (IST)']
             overview['Genutzt %'] = (overview['Ausgaben (IST)'] / overview['Gesamt Verfügbar'] * 100).fillna(0)
             
+            # --- NEU: Prio Merge & Sortierung ---
+            # Index ist Kategorie Name. Wir holen Prio dazu.
+            overview = overview.merge(current_cats_df.set_index('name'), left_index=True, right_index=True, how='left')
+            overview['priority'] = overview['priority'].fillna("Standard")
+            
+            # Sortieren: Erst Prio (A, B, C, S), dann Name
+            overview = overview.sort_values(by=['priority', 'Gesamt Verfügbar'], ascending=[True, False])
+            
             if not overview.empty:
                 sum_row = overview.sum(numeric_only=True)
                 total_used, total_avail = sum_row['Ausgaben (IST)'], sum_row['Gesamt Verfügbar']
                 sum_row['Genutzt %'] = (total_used / total_avail * 100) if total_avail > 0 else 0
+                
+                # Summenzeile bauen
                 sum_df = pd.DataFrame(sum_row).T
+                sum_df['priority'] = "" # Keine Prio für Summe
                 sum_df.index = ["∑ GESAMT"]
                 
                 c1, c2, c3, c4 = st.columns(4)
@@ -366,26 +390,41 @@ else:
                 c4.metric("Aktueller Rest", format_euro(sum_row['Rest']), delta_color="normal")
                 
                 display_df = pd.concat([overview, sum_df])
-                st.dataframe(display_df.style.format("{:.2f} €", subset=['Übertrag Vormonat', 'Budget (Neu)', 'Ausgaben (IST)', 'Gesamt Verfügbar', 'Rest']).format("{:.1f} %", subset=['Genutzt %']).bar(subset=['Genutzt %'], color='#ffbd45', vmin=0, vmax=100).applymap(lambda v: 'color: gray', subset=['Übertrag Vormonat']).applymap(lambda v: 'font-weight: bold; background-color: #f0f2f6', subset=pd.IndexSlice[display_df.index[-1], :]).applymap(lambda v: 'font-weight: bold', subset=['Rest']), use_container_width=True)
+                
+                # Styling Funktion für Prio Spalte
+                def highlight_prio(val):
+                    if "A -" in str(val): return 'color: #d90429; font-weight: bold'
+                    if "B -" in str(val): return 'color: #e36414'
+                    if "C -" in str(val): return 'color: #0f4c5c'
+                    return ''
+
+                st.dataframe(
+                    display_df.style
+                    .format("{:.2f} €", subset=['Übertrag Vormonat', 'Budget (Neu)', 'Ausgaben (IST)', 'Gesamt Verfügbar', 'Rest'])
+                    .format("{:.1f} %", subset=['Genutzt %'])
+                    .bar(subset=['Genutzt %'], color='#ffbd45', vmin=0, vmax=100)
+                    .applymap(lambda v: 'color: gray', subset=['Übertrag Vormonat'])
+                    .applymap(lambda v: 'font-weight: bold; background-color: #f0f2f6', subset=pd.IndexSlice[display_df.index[-1], :])
+                    .applymap(highlight_prio, subset=['priority'])
+                    .applymap(lambda v: 'font-weight: bold', subset=['Rest']),
+                    use_container_width=True
+                )
             else:
                 st.info("Kategorien wählen.")
 
             if sel_categories: df_curr_filtered = df_curr[df_curr['category'].isin(sel_categories)]
             else: df_curr_filtered = pd.DataFrame()
-                
             with st.expander("Einzelbuchungen (Gefiltert)"):
                 st.dataframe(df_curr_filtered[['date', 'category', 'description', 'amount', 'type']].sort_values(by='date', ascending=False).style.format({"date": lambda t: t.strftime("%d.%m.%Y"), "amount": "{:.2f} €"}), hide_index=True, use_container_width=True)
 
-    # --- TAB 2: VERLAUF ---
+    # --- TAB 2-5 (Standard wie gehabt) ---
     with tab2:
         st.subheader("📈 Verlauf")
         mode = st.radio("Modus", ["Monate (Tag 1-31)", "Jahre (Jan-Dez)", "Quartale"], horizontal=True)
         cat_options = ["Alle"] + sorted(current_categories)
         sel_cat = st.selectbox("Kategorie", cat_options)
-        
         df_c = df[df['type'] == 'IST'].copy()
         if sel_cat != "Alle": df_c = df_c[df_c['category'] == sel_cat]
-        
         x_vals, y_a, y_b, n_a, n_b = [], [], [], "", ""
         if "Monate" in mode:
             opts = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
@@ -424,7 +463,6 @@ else:
                     return d.groupby('rm')['amount'].sum().reindex(range(1,4), fill_value=0)
                 y_a, y_b = get_q(df_c, n_a), get_q(df_c, n_b)
                 x_vals = ["M1", "M2", "M3"]
-
         if len(y_a) > 0:
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=x_vals, y=y_a.values, mode='lines+markers', name=n_a, line=dict(color='#0055ff', width=3), fill='tozeroy', fillcolor='rgba(0, 85, 255, 0.1)'))
@@ -433,7 +471,6 @@ else:
             if "Monate" in mode: fig.update_xaxes(title="Tag", tickmode='linear', tick0=1, dtick=1)
             st.plotly_chart(fig, use_container_width=True)
 
-    # --- TAB 3: Trends ---
     with tab3:
         st.subheader("Balken-Übersicht")
         vm = st.radio("Ansicht", ["Monatlich", "Quartalsweise", "Jährlich"], horizontal=True, key="tr_rad")
@@ -442,12 +479,9 @@ else:
             agg = agg.reset_index().sort_values('sort_key_month').set_index('Analyse_Monat')
             cols = [c for c in ['SOLL', 'IST'] if c in agg.columns]
             st.bar_chart(agg[cols])
-        elif vm == "Quartalsweise":
-            st.bar_chart(df.groupby(['Quartal', 'type'])['amount'].sum().unstack(fill_value=0))
-        else:
-            st.bar_chart(df.groupby(['Jahr', 'type'])['amount'].sum().unstack(fill_value=0))
+        elif vm == "Quartalsweise": st.bar_chart(df.groupby(['Quartal', 'type'])['amount'].sum().unstack(fill_value=0))
+        else: st.bar_chart(df.groupby(['Jahr', 'type'])['amount'].sum().unstack(fill_value=0))
 
-    # --- TAB 4: Vergleich ---
     with tab4:
         st.subheader("📊 Periodenvergleich")
         aps = [f"M: {x}" for x in df['Analyse_Monat'].unique()] + [f"Q: {x}" for x in df['Quartal'].unique()] + [f"J: {x}" for x in df['Jahr'].unique()]
@@ -469,7 +503,6 @@ else:
                     cp['Diff'], cp['%'] = cp['Basis']-cp['Vgl'], cp.apply(lambda r: (r['Basis']-r['Vgl'])/r['Vgl']*100 if r['Vgl']!=0 else (100 if r['Basis']>0 else 0), axis=1)
                     st.dataframe(cp.style.format("{:.2f} €", subset=['Basis','Vgl','Diff']).format("{:+.1f} %", subset=['%']).applymap(lambda v: f'color: {"red" if v>0 else "green"}; font-weight: bold' if v!=0 else 'color:black', subset=['Diff', '%']), use_container_width=True)
 
-    # --- TAB 5: EDITOR ---
     with tab5:
         st.subheader("📝 Daten korrigieren")
         df_ed = df.sort_values(by=['date', 'id'], ascending=[False, False]).copy()
@@ -483,9 +516,7 @@ else:
             "description": st.column_config.TextColumn("Info"),
             "Analyse_Monat": None, "Monat_Name": None, "Monat_Num": None, "Jahr": None, "Quartal": None, "sort_key_month": None
         }
-        
         edited = st.data_editor(df_ed, key="trans_ed", column_config=col_conf, num_rows="dynamic", use_container_width=True, hide_index=True)
-        
         if st.session_state["trans_ed"]:
             chg = st.session_state["trans_ed"]
             conn = sqlite3.connect(DB_FILE)
