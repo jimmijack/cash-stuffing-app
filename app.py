@@ -40,11 +40,34 @@ def format_euro(val):
 def get_db_connection():
     return sqlite3.connect(DB_FILE)
 
+def execute_db(query, params=()):
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute(query, params)
+        conn.commit()
+        res = True
+    except Exception as e:
+        res = False
+    conn.close()
+    return res
+
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, category TEXT, description TEXT, amount REAL, type TEXT, budget_month TEXT, is_online INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, priority TEXT DEFAULT 'Standard', target_amount REAL DEFAULT 0.0, due_date TEXT, notes TEXT, is_fixed INTEGER DEFAULT 0, default_budget REAL DEFAULT 0.0)''')
+    
+    # NEU: Kredite Tabelle
+    c.execute('''CREATE TABLE IF NOT EXISTS loans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        start_date TEXT,
+        total_amount REAL,
+        interest_rate REAL,
+        term_months INTEGER,
+        monthly_payment REAL
+    )''')
     
     # Migrations
     try: c.execute("SELECT default_budget FROM categories LIMIT 1")
@@ -65,25 +88,12 @@ def get_data(query, params=()):
     conn.close()
     return df
 
-def execute_db(query, params=()):
-    conn = get_db_connection()
-    c = conn.cursor()
-    try:
-        c.execute(query, params)
-        conn.commit()
-        res = True
-    except Exception as e:
-        res = False
-    conn.close()
-    return res
-
-# --- Fehlende Funktionen wieder hinzugefügt ---
+# --- Fehlende Funktionen Wrapper ---
 def add_category_to_db(new_cat, prio, is_fixed=0):
     return execute_db("INSERT INTO categories (name, priority, is_fixed) VALUES (?, ?, ?)", (new_cat, prio, is_fixed))
 
 def delete_category_from_db(cat_to_del):
     return execute_db("DELETE FROM categories WHERE name = ?", (cat_to_del,))
-# -----------------------------------------------
 
 def load_main_data():
     df = get_data("SELECT * FROM transactions")
@@ -115,7 +125,7 @@ st.title("💶 Cash Stuffing Planer")
 
 with st.sidebar:
     st.markdown("### 🧭 Navigation")
-    sb_mode = st.segmented_control("Menü", ["📝 Neu", "💰 Verteiler", "💸 Transfer", "🏦 Bank", "🧮 Tools"], selection_mode="single", default="📝 Neu")
+    sb_mode = st.segmented_control("Menü", ["📝 Neu", "💰 Verteiler", "💸 Transfer", "🏦 Bank", "📉 Kredite", "🧮 Tools"], selection_mode="single", default="📝 Neu")
     st.divider()
 
     # 1. NEU
@@ -229,7 +239,24 @@ with st.sidebar:
                     st.rerun()
         else: st.success("Leer.")
 
-    # 5. TOOLS
+    # 5. KREDITE (ADD)
+    elif sb_mode == "📉 Kredite":
+        st.subheader("Kredit hinzufügen")
+        with st.form("loan_add"):
+            l_name = st.text_input("Name (z.B. PayPal Laptop)")
+            l_sum = st.number_input("Kreditsumme (€)", min_value=0.0, step=50.0)
+            l_rate = st.number_input("Rate (€/Monat)", min_value=0.0, step=10.0)
+            l_zins = st.number_input("Zins (% p.a.)", min_value=0.0, step=0.1)
+            l_start = st.date_input("Startdatum", date.today())
+            l_term = st.number_input("Laufzeit (Monate)", min_value=1, value=12)
+            
+            if st.form_submit_button("Kredit anlegen", use_container_width=True):
+                execute_db("INSERT INTO loans (name, start_date, total_amount, interest_rate, term_months, monthly_payment) VALUES (?,?,?,?,?,?)",
+                           (l_name, l_start, l_sum, l_zins, l_term, l_rate))
+                st.success("Gespeichert!")
+                st.rerun()
+
+    # 6. TOOLS
     elif sb_mode == "🧮 Tools":
         st.subheader("Scheinrechner")
         target_val = st.number_input("Betrag", min_value=0, value=500, step=50)
@@ -283,14 +310,14 @@ with st.sidebar:
                 execute_db("DELETE FROM transactions"); execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
                 st.rerun()
             if st.button("💥 Alles löschen", type="primary"):
-                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM sqlite_sequence")
+                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM sqlite_sequence")
                 st.rerun()
 
 # --- MAIN TABS ---
 if df.empty and not current_categories:
     st.info("Start: Lege in der Sidebar Kategorien an.")
 else:
-    t1, t2, t3, t4, t5, t6 = st.tabs(["📊 Dashboard", "🎯 Sparziele", "📈 Analyse", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["📊 Dashboard", "🎯 Sparziele", "📉 Kredite", "📈 Analyse", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
 
     # T1
     with t1:
@@ -395,8 +422,101 @@ else:
                         execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
                     st.rerun()
 
-    # T3 Analyse
+    # T3 Kredite (NEU)
     with t3:
+        st.subheader("📉 Kredit Übersicht")
+        loans_df = get_data("SELECT * FROM loans")
+        
+        if loans_df.empty:
+            st.info("Keine Kredite angelegt. Nutze die Sidebar.")
+        else:
+            loans_df['start_date'] = pd.to_datetime(loans_df['start_date'])
+            
+            # Berechnungen
+            def calc_loan(row):
+                end_date = row['start_date'] + relativedelta(months=row['term_months'])
+                today = datetime.datetime.now()
+                
+                if today > end_date:
+                    return "✅ Bezahlt", 1.0, 0.0, end_date
+                
+                # Monate vergangen
+                diff = relativedelta(today, row['start_date'])
+                months_passed = diff.years*12 + diff.months
+                if months_passed < 0: months_passed = 0
+                
+                progress = months_passed / row['term_months']
+                
+                # Sehr grobe Restschuld Schätzung (Linear)
+                # Genauer geht es nur mit Amortisationsplan, aber das reicht für Overview
+                paid = months_passed * row['monthly_payment']
+                # Hier nehmen wir vereinfacht an: Restlaufzeit * Rate = Restschuld (inkl Zins)
+                remaining_months = row['term_months'] - months_passed
+                remaining_amount = remaining_months * row['monthly_payment']
+                
+                return f"Noch {remaining_months} Mon.", progress, remaining_amount, end_date
+
+            res = loans_df.apply(calc_loan, axis=1, result_type='expand')
+            loans_df['Status'] = res[0]
+            loans_df['Progress'] = res[1]
+            loans_df['Rest (ca.)'] = res[2]
+            loans_df['Ende'] = res[3]
+            
+            # KPIs
+            total_monthly = loans_df[loans_df['Ende'] > datetime.datetime.now()]['monthly_payment'].sum()
+            total_debt = loans_df['Rest (ca.)'].sum()
+            debt_free_date = loans_df['Ende'].max().strftime("%b %Y")
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Monatliche Rate (Gesamt)", format_euro(total_monthly))
+            c2.metric("Restschuld (ca. inkl. Zins)", format_euro(total_debt))
+            c3.metric("Schuldenfrei ab", debt_free_date)
+            
+            # Highlight highest Interest
+            max_int_idx = loans_df['interest_rate'].idxmax()
+            st.caption(f"🔥 Fokus-Empfehlung (Lawine): **{loans_df.loc[max_int_idx, 'name']}** hat mit {loans_df.loc[max_int_idx, 'interest_rate']}% den höchsten Zins.")
+            
+            # Editor
+            loan_cfg = {
+                "id": st.column_config.NumberColumn(disabled=True),
+                "name": st.column_config.TextColumn("Kredit"),
+                "start_date": st.column_config.DateColumn("Start"),
+                "total_amount": st.column_config.NumberColumn("Kreditsumme", format="%.2f €"),
+                "interest_rate": st.column_config.NumberColumn("Zins %"),
+                "term_months": st.column_config.NumberColumn("Laufzeit (M)"),
+                "monthly_payment": st.column_config.NumberColumn("Rate", format="%.2f €"),
+                "Progress": st.column_config.ProgressColumn("Fortschritt", format="%.0f%%"),
+                "Rest (ca.)": st.column_config.NumberColumn(format="%.2f €", disabled=True),
+                "Ende": st.column_config.DateColumn(format="DD.MM.YYYY", disabled=True),
+                "Status": st.column_config.TextColumn(disabled=True)
+            }
+            
+            edited_loans = st.data_editor(
+                loans_df, 
+                key="loan_editor",
+                hide_index=True,
+                use_container_width=True,
+                column_config=loan_cfg,
+                column_order=["name", "monthly_payment", "Rest (ca.)", "Progress", "Status", "interest_rate", "total_amount", "start_date", "term_months", "Ende"]
+            )
+            
+            # Save Logic
+            if st.session_state["loan_editor"]:
+                chg = st.session_state["loan_editor"]
+                for i in chg["deleted_rows"]: 
+                    execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
+                for i, v in chg["edited_rows"].items():
+                    lid = loans_df.iloc[i]['id']
+                    for k, val in v.items():
+                        # Date fix
+                        if k == 'start_date':
+                             if isinstance(val, (datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
+                        execute_db(f"UPDATE loans SET {k}=? WHERE id=?", (val, int(lid)))
+                
+                if chg["deleted_rows"] or chg["edited_rows"]: st.rerun()
+
+    # T4 Analyse
+    with t4:
         st.subheader("Analyse")
         if df.empty: st.info("Leer.")
         else:
@@ -407,8 +527,8 @@ else:
                 with c1: st.plotly_chart(px.pie(di, values='amount', names='category', title='Kategorien'), use_container_width=True)
                 with c2: st.plotly_chart(px.bar(di.groupby(['budget_month','category'])['amount'].sum().reset_index(), x='budget_month', y='amount', color='category', title='Trend'), use_container_width=True)
 
-    # T4 Vergleich
-    with t4:
+    # T5 Vergleich
+    with t5:
         st.subheader("Vergleich")
         if df.empty: st.info("Leer.")
         else:
@@ -425,8 +545,8 @@ else:
                 st.dataframe(cp.style.format("{:.2f} €").background_gradient(cmap="RdYlGn_r", subset=['Diff']), use_container_width=True)
             else: st.info("Zu wenig Daten.")
 
-    # T5 Data
-    with t5:
+    # T6 Data
+    with t6:
         st.subheader("Editor")
         de = get_data("SELECT * FROM transactions ORDER BY date DESC, id DESC")
         if not de.empty: de['date'] = pd.to_datetime(de['date'])
@@ -446,8 +566,8 @@ else:
                            (r.get('date', date.today()), r.get('category', 'Sonstiges'), r.get('description', ''), r.get('amount', 0), r.get('type', 'IST'), r.get('budget_month', date.today().strftime('%Y-%m')), 1 if r.get('is_online') else 0))
             if ch["deleted_rows"] or ch["edited_rows"] or ch["added_rows"]: st.rerun()
 
-    # T6 Anleitung
-    with t6:
+    # T7 Anleitung
+    with t7:
         st.subheader("📖 Anleitung & Workflow")
         
         with st.expander("1️⃣ Einrichtung (Einmalig)", expanded=True):
