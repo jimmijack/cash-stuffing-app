@@ -58,7 +58,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, category TEXT, description TEXT, amount REAL, type TEXT, budget_month TEXT, is_online INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, priority TEXT DEFAULT 'Standard', target_amount REAL DEFAULT 0.0, due_date TEXT, notes TEXT, is_fixed INTEGER DEFAULT 0, default_budget REAL DEFAULT 0.0)''')
     
-    # Kredite Tabelle (Angepasst)
+    # Kredite Tabelle
     c.execute('''CREATE TABLE IF NOT EXISTS loans (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
@@ -72,12 +72,8 @@ def init_db():
     # Migrations
     try: c.execute("SELECT default_budget FROM categories LIMIT 1")
     except: c.execute("ALTER TABLE categories ADD COLUMN default_budget REAL DEFAULT 0.0")
-    
-    # Migration für Kredite (Zinssumme statt Rate, falls alt)
     try: c.execute("SELECT interest_amount FROM loans LIMIT 1")
-    except: 
-        # Falls alte Spalte interest_rate existiert, lassen wir sie, fügen aber interest_amount hinzu
-        c.execute("ALTER TABLE loans ADD COLUMN interest_amount REAL DEFAULT 0.0")
+    except: c.execute("ALTER TABLE loans ADD COLUMN interest_amount REAL DEFAULT 0.0")
 
     c.execute("SELECT count(*) FROM categories")
     if c.fetchone()[0] == 0:
@@ -428,7 +424,7 @@ else:
                         execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
                     st.rerun()
 
-    # T3 Kredite (Optimiert)
+    # T3 Kredite (Optimiert & Löschfunktion)
     with t3:
         st.subheader("📉 Kredit Übersicht")
         loans_df = get_data("SELECT * FROM loans")
@@ -440,38 +436,24 @@ else:
             
             # Berechnungen FIX
             def calc_loan(row):
-                # Gesamtbelastung (Kredit + Zinsen Fix)
                 total_liability = row['total_amount'] + row.get('interest_amount', 0.0)
-                
-                # Monate seit Start (Robustere Berechnung)
                 today = date.today()
                 start = row['start_date'].date()
                 
                 if today < start:
                     months_passed = 0
                 else:
-                    # Einfache Monatsdifferenz
                     months_passed = (today.year - start.year) * 12 + (today.month - start.month)
-                    # Den aktuellen Monat als "angebrochen/gezahlt" werten?
-                    # Meistens zahlt man am Anfang oder Ende. Wir zählen ihn dazu.
                     months_passed += 1 
                 
-                # Cap bei Laufzeit
                 if months_passed > row['term_months']: months_passed = row['term_months']
                 
-                # Gezahlt bisher
                 paid_so_far = months_passed * row['monthly_payment']
                 if paid_so_far > total_liability: paid_so_far = total_liability
                 
-                # Rest
                 remaining = total_liability - paid_so_far
-                
-                # Progress
                 progress = paid_so_far / total_liability if total_liability > 0 else 0
-                
-                # Enddatum
                 end_date = row['start_date'] + relativedelta(months=row['term_months'])
-                
                 status = "✅ Bezahlt" if remaining <= 0 else f"{int(row['term_months'] - months_passed)} Raten offen"
                 
                 return status, progress, remaining, end_date, total_liability
@@ -483,7 +465,6 @@ else:
             loans_df['Ende'] = res[3]
             loans_df['Gesamt'] = res[4]
             
-            # KPIs
             total_monthly = loans_df[loans_df['Rest'] > 0]['monthly_payment'].sum()
             total_debt = loans_df['Rest'].sum()
             
@@ -512,19 +493,29 @@ else:
                 hide_index=True,
                 use_container_width=True,
                 column_config=loan_cfg,
-                column_order=["name", "monthly_payment", "Rest", "Progress", "Gesamt", "interest_amount", "start_date", "term_months", "Ende"]
+                column_order=["name", "monthly_payment", "Rest", "Progress", "Gesamt", "interest_amount", "start_date", "term_months", "Ende"],
+                num_rows="dynamic"
             )
             
             if st.session_state["loan_editor"]:
                 chg = st.session_state["loan_editor"]
                 for i in chg["deleted_rows"]: 
-                    execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
+                    # Löschlogik gefixt
+                    lid = loans_df.iloc[i]['id']
+                    execute_db("DELETE FROM loans WHERE id=?", (int(lid),))
+                
                 for i, v in chg["edited_rows"].items():
                     lid = loans_df.iloc[i]['id']
                     for k, val in v.items():
                         if k == 'start_date' and isinstance(val, (datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
                         execute_db(f"UPDATE loans SET {k}=? WHERE id=?", (val, int(lid)))
-                if chg["deleted_rows"] or chg["edited_rows"]: st.rerun()
+                
+                if chg["added_rows"]:
+                    for row in chg["added_rows"]:
+                        execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)",
+                                   (row.get("name","Neu"), row.get("start_date",date.today()), row.get("total_amount",0), row.get("interest_amount",0), row.get("term_months",12), row.get("monthly_payment",0)))
+
+                if chg["deleted_rows"] or chg["edited_rows"] or chg["added_rows"]: st.rerun()
 
     # T4 Analyse
     with t4:
