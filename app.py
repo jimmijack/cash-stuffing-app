@@ -32,6 +32,7 @@ DB_FILE = "/data/budget.db"
 DE_MONTHS = {1: "Januar", 2: "Februar", 3: "März", 4: "April", 5: "Mai", 6: "Juni", 7: "Juli", 8: "August", 9: "September", 10: "Oktober", 11: "November", 12: "Dezember"}
 DEFAULT_CATEGORIES = ["Lebensmittel", "Miete", "Sparen", "Freizeit", "Transport", "Sonstiges", "Fixkosten", "Kleidung", "Geschenke", "Notgroschen"]
 PRIO_OPTIONS = ["A - Hoch", "B - Mittel", "C - Niedrig", "Standard"]
+CYCLE_OPTIONS = ["Monatlich", "Vierteljährlich", "Halbjährlich", "Jährlich"]
 
 # --- 2. HELPER ---
 def format_euro(val):
@@ -59,6 +60,17 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, priority TEXT DEFAULT 'Standard', target_amount REAL DEFAULT 0.0, due_date TEXT, notes TEXT, is_fixed INTEGER DEFAULT 0, default_budget REAL DEFAULT 0.0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS loans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, start_date TEXT, total_amount REAL, interest_amount REAL DEFAULT 0.0, term_months INTEGER, monthly_payment REAL)''')
     
+    # NEU: Abos Tabelle
+    c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        amount REAL,
+        cycle TEXT,
+        category TEXT,
+        start_date TEXT,
+        notice_period TEXT
+    )''')
+
     # Migrations
     try: c.execute("SELECT default_budget FROM categories LIMIT 1")
     except: c.execute("ALTER TABLE categories ADD COLUMN default_budget REAL DEFAULT 0.0")
@@ -117,7 +129,8 @@ st.title("💶 Cash Stuffing Planer")
 
 with st.sidebar:
     st.markdown("### 🧭 Navigation")
-    sb_mode = st.segmented_control("Menü", ["📝 Neu", "💰 Verteiler", "💸 Transfer", "🏦 Bank", "📉 Kredite", "🧮 Tools"], selection_mode="single", default="📝 Neu")
+    # MENÜ ERWEITERT
+    sb_mode = st.segmented_control("Menü", ["📝 Neu", "💰 Verteiler", "💸 Transfer", "🏦 Bank", "📉 Kredite", "🔄 Abos", "🧮 Tools"], selection_mode="single", default="📝 Neu")
     st.divider()
 
     # 1. NEU
@@ -236,8 +249,8 @@ with st.sidebar:
         st.subheader("Kredit hinzufügen")
         with st.form("loan_add"):
             l_name = st.text_input("Name (z.B. PayPal)")
-            l_sum = st.number_input("Kreditsumme (€)", min_value=0.0, step=50.0, help="Ursprüngliche Nettokreditsumme")
-            l_zins_sum = st.number_input("Zinsen Gesamt (€)", min_value=0.0, step=10.0, help="Summe der Zinsen über Laufzeit")
+            l_sum = st.number_input("Kreditsumme (€)", min_value=0.0, step=50.0)
+            l_zins_sum = st.number_input("Zinsen Gesamt (€)", min_value=0.0, step=10.0)
             l_rate = st.number_input("Rate (€/Monat)", min_value=0.0, step=10.0)
             l_start = st.date_input("Datum der 1. Rate", date.today())
             l_term = st.number_input("Laufzeit (Monate)", min_value=1, value=12)
@@ -248,7 +261,23 @@ with st.sidebar:
                 st.success("Gespeichert!")
                 st.rerun()
 
-    # 6. TOOLS
+    # 6. ABOS (NEU)
+    elif sb_mode == "🔄 Abos":
+        st.subheader("Abo hinzufügen")
+        with st.form("sub_add"):
+            s_name = st.text_input("Name (z.B. Netflix)")
+            s_cost = st.number_input("Kosten (€)", min_value=0.0, format="%.2f")
+            s_cycle = st.selectbox("Turnus", CYCLE_OPTIONS)
+            s_cat = st.selectbox("Kategorie (optional)", [""] + current_categories, index=0)
+            s_start = st.date_input("Startdatum (Optional)", date.today())
+            
+            if st.form_submit_button("Abo anlegen", use_container_width=True):
+                execute_db("INSERT INTO subscriptions (name, amount, cycle, category, start_date) VALUES (?,?,?,?,?)",
+                           (s_name, s_cost, s_cycle, s_cat, s_start))
+                st.success("Abo gespeichert!")
+                st.rerun()
+
+    # 7. TOOLS
     elif sb_mode == "🧮 Tools":
         st.subheader("Scheinrechner")
         target_val = st.number_input("Betrag", min_value=0, value=500, step=50)
@@ -266,7 +295,6 @@ with st.sidebar:
     st.markdown("---")
     with st.expander("⚙️ Verwaltung & Backup"):
         
-        # ADD CATEGORY FORM
         st.caption("Neue Kategorie")
         with st.form("add_cat_form", clear_on_submit=True):
             c_n, c_p = st.columns([2,1])
@@ -279,31 +307,22 @@ with st.sidebar:
                     if add_category_to_db(new_name, new_prio, 1 if new_fix else 0):
                         st.success(f"{new_name} angelegt!")
                         st.rerun()
-                    else:
-                        st.error("Existiert bereits.")
-                else:
-                    st.warning("Name fehlt.")
+                    else: st.error("Existiert bereits.")
+                else: st.warning("Name fehlt.")
         
         st.divider()
-        
-        # EDIT CATEGORY FORM
         st.caption("Kategorie bearbeiten")
         edit_cat = st.selectbox("Auswahl", current_categories)
         if edit_cat:
             row = cat_df[cat_df['name'] == edit_cat].iloc[0]
-            
-            # Wir nutzen hier ein Formular, damit Änderungen nicht sofort re-runnen
             with st.form("edit_cat_form"):
                 try: p_idx = PRIO_OPTIONS.index(row['priority'])
                 except: p_idx = 3
-                
                 ep = st.selectbox("Prio", PRIO_OPTIONS, index=p_idx)
                 ef = st.checkbox("Fixkosten?", value=(row['is_fixed']==1))
                 ed = st.number_input("Standard Budget (€)", value=float(row.get('default_budget', 0.0)), step=10.0)
                 
                 c_save, c_del = st.columns(2)
-                
-                # Zwei Buttons im Formular sind tricky, aber st.form_submit_button geht
                 saved = c_save.form_submit_button("Speichern")
                 deleted = c_del.form_submit_button("Löschen", type="primary")
                 
@@ -311,7 +330,6 @@ with st.sidebar:
                     execute_db("UPDATE categories SET priority=?, is_fixed=?, default_budget=? WHERE name=?", (ep, 1 if ef else 0, ed, edit_cat))
                     st.success("Gespeichert!")
                     st.rerun()
-                
                 if deleted:
                     delete_category_from_db(edit_cat)
                     st.success("Gelöscht!")
@@ -329,14 +347,15 @@ with st.sidebar:
                 execute_db("DELETE FROM transactions"); execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
                 st.rerun()
             if st.button("💥 Alles löschen", type="primary"):
-                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM sqlite_sequence")
+                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM subscriptions"); execute_db("DELETE FROM sqlite_sequence")
                 st.rerun()
 
 # --- MAIN TABS ---
 if df.empty and not current_categories:
     st.info("Start: Lege in der Sidebar Kategorien an.")
 else:
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["📊 Dashboard", "🎯 Sparziele", "📉 Kredite", "📈 Analyse", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
+    # 8 Tabs jetzt
+    t1, t2, t3, t8, t4, t5, t6, t7 = st.tabs(["📊 Dashboard", "🎯 Sparziele", "📉 Kredite", "🔄 Abos", "📈 Analyse", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
 
     # T1 Dashboard
     with t1:
@@ -455,11 +474,15 @@ else:
                 total_liability = row['total_amount'] + row.get('interest_amount', 0.0)
                 today = date.today()
                 start = row['start_date'].date()
+                
                 if today < start: months_passed = 0
                 else: months_passed = (today.year - start.year) * 12 + (today.month - start.month) + 1 
+                
                 if months_passed > row['term_months']: months_passed = row['term_months']
+                
                 paid_so_far = months_passed * row['monthly_payment']
                 if paid_so_far > total_liability: paid_so_far = total_liability
+                
                 remaining = total_liability - paid_so_far
                 progress = paid_so_far / total_liability if total_liability > 0 else 0
                 end_date = row['start_date'] + relativedelta(months=row['term_months'])
@@ -473,13 +496,35 @@ else:
             c1.metric("Monatliche Belastung", format_euro(loans_df[loans_df['Rest'] > 0]['monthly_payment'].sum()))
             c2.metric("Gesamtschulden (Rest)", format_euro(loans_df['Rest'].sum()))
             
-            loan_cfg = {"id": st.column_config.NumberColumn(disabled=True), "name": st.column_config.TextColumn("Kredit"), "start_date": st.column_config.DateColumn("Start"), "total_amount": st.column_config.NumberColumn("Nettokredit", format="%.2f €"), "interest_amount": st.column_config.NumberColumn("Zinsen €", format="%.2f €"), "Gesamt": st.column_config.NumberColumn("Bruttoschuld", format="%.2f €", disabled=True), "term_months": st.column_config.NumberColumn("Laufzeit (M)"), "monthly_payment": st.column_config.NumberColumn("Rate", format="%.2f €"), "Progress": st.column_config.ProgressColumn("Status", format="%.0f%%"), "Rest": st.column_config.NumberColumn("Restschuld", format="%.2f €", disabled=True), "Ende": st.column_config.DateColumn(format="DD.MM.YYYY", disabled=True), "Status": st.column_config.TextColumn(disabled=True)}
+            loan_cfg = {
+                "id": st.column_config.NumberColumn(disabled=True),
+                "name": st.column_config.TextColumn("Kredit"),
+                "start_date": st.column_config.DateColumn("Start"),
+                "total_amount": st.column_config.NumberColumn("Nettokredit", format="%.2f €"),
+                "interest_amount": st.column_config.NumberColumn("Zinsen €", format="%.2f €"),
+                "Gesamt": st.column_config.NumberColumn("Bruttoschuld", format="%.2f €", disabled=True),
+                "term_months": st.column_config.NumberColumn("Laufzeit (M)"),
+                "monthly_payment": st.column_config.NumberColumn("Rate", format="%.2f €"),
+                "Progress": st.column_config.ProgressColumn("Status", format="%.0f%%"),
+                "Rest": st.column_config.NumberColumn("Restschuld", format="%.2f €", disabled=True),
+                "Ende": st.column_config.DateColumn(format="DD.MM.YYYY", disabled=True),
+                "Status": st.column_config.TextColumn(disabled=True)
+            }
             
-            edited_loans = st.data_editor(loans_df, key="loan_editor", hide_index=True, use_container_width=True, column_config=loan_cfg, column_order=["name", "monthly_payment", "Rest", "Progress", "Gesamt", "interest_amount", "start_date", "term_months", "Ende"], num_rows="dynamic")
+            edited_loans = st.data_editor(
+                loans_df, 
+                key="loan_editor",
+                hide_index=True,
+                use_container_width=True,
+                column_config=loan_cfg,
+                column_order=["name", "monthly_payment", "Rest", "Progress", "Gesamt", "interest_amount", "start_date", "term_months", "Ende"],
+                num_rows="dynamic"
+            )
             
             if st.session_state["loan_editor"]:
                 chg = st.session_state["loan_editor"]
-                for i in chg["deleted_rows"]: execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
+                for i in chg["deleted_rows"]: 
+                    execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
                 for i, v in chg["edited_rows"].items():
                     lid = loans_df.iloc[i]['id']
                     for k, val in v.items():
@@ -487,7 +532,71 @@ else:
                         execute_db(f"UPDATE loans SET {k}=? WHERE id=?", (val, int(lid)))
                 if chg["added_rows"]:
                     for row in chg["added_rows"]:
-                        execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)", (row.get("name","Neu"), row.get("start_date",date.today()), row.get("total_amount",0), row.get("interest_amount",0), row.get("term_months",12), row.get("monthly_payment",0)))
+                        execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)",
+                                   (row.get("name","Neu"), row.get("start_date",date.today()), row.get("total_amount",0), row.get("interest_amount",0), row.get("term_months",12), row.get("monthly_payment",0)))
+                if chg["deleted_rows"] or chg["edited_rows"] or chg["added_rows"]: st.rerun()
+
+    # T8 ABOS (NEU)
+    with t8:
+        st.subheader("🔄 Abos & Verträge")
+        subs_df = get_data("SELECT * FROM subscriptions")
+        
+        if subs_df.empty:
+            st.info("Keine Abos vorhanden. Füge welche über die Sidebar hinzu.")
+        else:
+            subs_df['start_date'] = pd.to_datetime(subs_df['start_date'])
+            
+            # Intelligente Berechnung
+            def calc_monthly_cost(row):
+                amt = row['amount']
+                if row['cycle'] == "Jährlich": return amt / 12
+                if row['cycle'] == "Vierteljährlich": return amt / 3
+                if row['cycle'] == "Halbjährlich": return amt / 6
+                return amt
+
+            subs_df['Monatlich'] = subs_df.apply(calc_monthly_cost, axis=1)
+            
+            # KPIs
+            total_monthly_fix = subs_df['Monatlich'].sum()
+            total_yearly_fix = total_monthly_fix * 12
+            
+            c1, c2 = st.columns(2)
+            c1.metric("Monatliche Belastung (Ø)", format_euro(total_monthly_fix))
+            c2.metric("Jährliche Gesamtkosten", format_euro(total_yearly_fix))
+            
+            sub_cfg = {
+                "id": st.column_config.NumberColumn(disabled=True),
+                "name": st.column_config.TextColumn("Anbieter"),
+                "amount": st.column_config.NumberColumn("Kosten", format="%.2f €"),
+                "cycle": st.column_config.SelectboxColumn("Turnus", options=CYCLE_OPTIONS),
+                "category": st.column_config.SelectboxColumn("Kategorie", options=[""]+current_categories),
+                "start_date": st.column_config.DateColumn("Startdatum"),
+                "notice_period": st.column_config.TextColumn("Kündigungsfrist"),
+                "Monatlich": st.column_config.NumberColumn("Ø Monat", format="%.2f €", disabled=True)
+            }
+            
+            edited_subs = st.data_editor(
+                subs_df,
+                key="sub_editor",
+                hide_index=True,
+                use_container_width=True,
+                column_config=sub_cfg,
+                column_order=["name", "amount", "cycle", "Monatlich", "category", "start_date", "notice_period"],
+                num_rows="dynamic"
+            )
+            
+            if st.session_state["sub_editor"]:
+                chg = st.session_state["sub_editor"]
+                for i in chg["deleted_rows"]: execute_db("DELETE FROM subscriptions WHERE id=?", (int(subs_df.iloc[i]['id']),))
+                for i, v in chg["edited_rows"].items():
+                    sid = subs_df.iloc[i]['id']
+                    for k, val in v.items():
+                        if k == 'start_date' and isinstance(val, (datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
+                        execute_db(f"UPDATE subscriptions SET {k}=? WHERE id=?", (val, int(sid)))
+                if chg["added_rows"]:
+                    for row in chg["added_rows"]:
+                        execute_db("INSERT INTO subscriptions (name, amount, cycle, category, start_date, notice_period) VALUES (?,?,?,?,?,?)",
+                                   (row.get("name","Neu"), row.get("amount",0), row.get("cycle","Monatlich"), row.get("category","Fixkosten"), row.get("start_date",date.today()), row.get("notice_period","")))
                 if chg["deleted_rows"] or chg["edited_rows"] or chg["added_rows"]: st.rerun()
 
     # T4 Analyse
@@ -548,38 +657,28 @@ else:
         with st.expander("1️⃣ Einrichtung (Einmalig)", expanded=True):
             st.markdown("""
             1. Gehe in der Sidebar (links) ganz unten zu **⚙️ Verwaltung**.
-            2. Erstelle deine Kategorien (z.B. *Lebensmittel, Miete, Urlaub*).
-            3. **WICHTIG:** Wenn eine Kategorie nur vom Konto abgeht (z.B. Miete, Netflix), setze den Haken bei **"Ist Fixkosten?"**. 
-               *Diese tauchen dann nicht im "Bar benötigt"-Rechner auf.*
-            4. Lege bei Bedarf ein **Standard-Budget** fest, um den Monatsstart zu beschleunigen.
+            2. Erstelle deine Kategorien. Setze **Fixkosten** auf "Ja", wenn sie nur vom Konto abgehen.
+            3. Lege Standard-Budgets fest.
             """)
             
-        with st.expander("2️⃣ Monatsanfang (Geld verteilen)", expanded=True):
+        with st.expander("2️⃣ Monatsanfang (Budget verteilen)"):
             st.markdown("""
-            1. Wähle in der Sidebar **💰 Verteiler**.
-            2. Wähle das Datum und den Ziel-Monat.
-            3. Die Tabelle ist mit deinen Standard-Budgets vorausgefüllt. Passe die Werte an.
-            4. Unten siehst du **"Bar benötigt"**. Das ist die Summe, die du am Automaten abheben musst (für deine Umschläge).
-            5. Klicke auf **"Budgets buchen"**. Alle SOLL-Werte sind nun im System.
+            1. Sidebar **💰 Verteiler**.
+            2. Wähle Datum/Monat.
+            3. Passe Werte an und klicke "Budgets buchen".
+            4. **Bar benötigt** zeigt dir, wie viel Bargeld du abheben musst.
             """)
             
-        with st.expander("3️⃣ Im Alltag (Ausgaben erfassen)", expanded=True):
+        with st.expander("3️⃣ Ausgaben & Hybrid-System"):
             st.markdown("""
-            1. Wähle in der Sidebar **📝 Neu**.
-            2. Wähle **IST (Ausgabe)**.
-            3. Gib Betrag und Kategorie ein.
-            4. **Hybrid-Check:**
-               * Hast du mit Bargeld aus dem Umschlag bezahlt? ➔ **Kein Haken**.
-               * Hast du mit Karte/PayPal/Uber bezahlt? ➔ **Setze Haken bei "💳 Online?"**.
-                 *(Das System merkt sich nun, dass du dieses Geld eigentlich noch bar im Umschlag hast, es aber auf das Konto muss)*.
+            1. Sidebar **📝 Neu**.
+            2. Wenn du mit Karte zahlst, setze den Haken bei **💳 Online?**.
+            3. Das Geld bleibt physisch im Umschlag, fehlt aber auf dem Konto.
+            4. Gehe zu **🏦 Bank**, um zu sehen, wie viel du einzahlen musst ("Back to Bank").
             """)
             
-        with st.expander("4️⃣ Hybrid-System (Back to Bank)"):
+        with st.expander("4️⃣ Abos & Kredite"):
             st.markdown("""
-            Wenn du oft online zahlst, sammelt sich Bargeld in deinen Umschlägen, das eigentlich auf dem Konto fehlt.
-            1. Gehe in der Sidebar zu **🏦 Bank**.
-            2. Du siehst "Im Umschlag: X €".
-            3. Nimm genau diesen Betrag aus deinen variablen Umschlägen.
-            4. Zahle ihn am Automaten auf dein Konto ein.
-            5. Klicke in der App auf **"Als eingezahlt markieren"**. Der virtuelle "Back to Bank"-Topf ist nun wieder leer.
+            1. **🔄 Abos:** Erfasse Netflix & Co., um deine monatliche Fixlast zu sehen.
+            2. **📉 Kredite:** Tracke Ratenzahlungen und sehe, wann du schuldenfrei bist.
             """)
