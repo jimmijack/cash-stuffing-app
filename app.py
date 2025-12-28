@@ -144,9 +144,7 @@ with st.sidebar:
         bulk_target_sel = st.radio("Ziel", [opt1, opt2], horizontal=True)
         bulk_month = today.strftime("%Y-%m") if bulk_target_sel == opt1 else nm.strftime("%Y-%m")
 
-        # Session State laden, FALLS leer, nehme default_budget aus DB
         if "bulk_df" not in st.session_state or len(st.session_state.bulk_df) != len(cat_df):
-            # Lade Default Werte
             temp = cat_df[['name', 'is_fixed', 'default_budget']].copy()
             temp.columns = ['Kategorie', 'is_fixed', 'Betrag']
             st.session_state.bulk_df = temp
@@ -180,7 +178,6 @@ with st.sidebar:
                                    (bulk_date, row["Kategorie"], "Verteiler", row["Betrag"], "SOLL", bulk_month, 0))
                         c += 1
                 st.success(f"✅ {c} Budgets gebucht!")
-                # Reset auf defaults
                 st.session_state.bulk_df = cat_df[['name', 'is_fixed', 'default_budget']].rename(columns={'name':'Kategorie', 'default_budget':'Betrag'})
                 st.rerun()
 
@@ -219,50 +216,23 @@ with st.sidebar:
                     st.rerun()
         else: st.success("Leer.")
 
-    # 5. TOOLS (SCHEINRECHNER)
+    # 5. TOOLS
     elif sb_mode == "🧮 Tools":
         st.subheader("Scheinrechner")
-        st.caption("Berechne die Stückelung für die Bank.")
-        
-        target_val = st.number_input("Abhebe-Betrag", min_value=0, value=500, step=50)
-        
-        # Greedy Algorithmus für Scheine
+        target_val = st.number_input("Betrag", min_value=0, value=500, step=50)
         notes = [200, 100, 50, 20, 10, 5]
         result = {}
         remainder = target_val
-        
-        # User Custom Input
-        with st.expander("Manuelle Anpassung"):
-            custom_notes = {}
-            for n in notes:
-                custom_notes[n] = st.number_input(f"{n}€ Scheine", min_value=0, value=0, key=f"n_{n}")
-        
-        # Check ob manuell was eingegeben wurde
-        manual_sum = sum([k*v for k,v in custom_notes.items()])
-        
-        if manual_sum > 0:
-            diff = target_val - manual_sum
-            st.write(f"Manuelle Summe: **{manual_sum} €**")
-            if diff != 0:
-                st.warning(f"Differenz: {diff} €")
-            else:
-                st.success("Passt genau!")
-        else:
-            # Auto Calc
-            for n in notes:
-                count = int(remainder // n)
-                if count > 0:
-                    result[n] = count
-                    remainder -= count * n
-            
-            st.markdown("#### Vorschlag:")
-            for n, c in result.items():
-                st.write(f"**{c}x** {n} €")
+        for n in notes:
+            count = int(remainder // n)
+            if count > 0:
+                result[n] = count
+                remainder -= count * n
+        for n, c in result.items(): st.write(f"**{c}x** {n} €")
 
     # --- SETTINGS ---
     st.markdown("---")
     with st.expander("⚙️ Verwaltung & Backup"):
-        # Add
         c_n, c_p = st.columns([2,1])
         new_name = c_n.text_input("Name", placeholder="Neue Kat.")
         new_prio = c_p.selectbox("Prio", PRIO_OPTIONS, label_visibility="collapsed")
@@ -273,18 +243,14 @@ with st.sidebar:
                 st.rerun()
         
         st.divider()
-        # Edit mit Standard Budget
         edit_cat = st.selectbox("Bearbeiten", current_categories)
         if edit_cat:
             row = cat_df[cat_df['name'] == edit_cat].iloc[0]
             try: p_idx = PRIO_OPTIONS.index(row['priority'])
             except: p_idx = 3
-            
             ep = st.selectbox("Prio", PRIO_OPTIONS, index=p_idx)
             ef = st.checkbox("Fixkosten?", value=(row['is_fixed']==1))
-            # NEU: Standard Budget
             ed = st.number_input("Standard Budget (€)", value=float(row.get('default_budget', 0.0)), step=10.0)
-            
             if st.button("Speichern"):
                 execute_db("UPDATE categories SET priority=?, is_fixed=?, default_budget=? WHERE name=?", (ep, 1 if ef else 0, ed, edit_cat))
                 st.rerun()
@@ -292,20 +258,16 @@ with st.sidebar:
                 delete_category_from_db(edit_cat)
                 st.rerun()
         
-        # Export
         st.divider()
-        st.caption("Daten-Sicherung")
         if not df.empty:
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Backup (.csv) laden", csv, "budget_backup.csv", "text/csv")
+            st.download_button("📥 Backup (.csv)", csv, "budget_backup.csv", "text/csv")
         
-        # Reset
         st.divider()
         st.error("Gefahrenzone")
         if st.checkbox("Reset freischalten"):
             if st.button("🧹 Nur Buchungen löschen", type="primary"):
-                execute_db("DELETE FROM transactions")
-                execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
+                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
                 st.rerun()
             if st.button("💥 Alles löschen", type="primary"):
                 execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM sqlite_sequence")
@@ -315,7 +277,7 @@ with st.sidebar:
 if df.empty and not current_categories:
     st.info("Start: Lege in der Sidebar Kategorien an.")
 else:
-    t1, t2, t3, t4, t5 = st.tabs(["📊 Dashboard", "🎯 Sparziele", "📈 Analyse", "⚖️ Vergleich", "📝 Daten"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["📊 Dashboard", "🎯 Sparziele", "📈 Analyse", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
 
     # T1
     with t1:
@@ -470,3 +432,54 @@ else:
                 execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
                            (r.get('date', date.today()), r.get('category', 'Sonstiges'), r.get('description', ''), r.get('amount', 0), r.get('type', 'IST'), r.get('budget_month', date.today().strftime('%Y-%m')), 1 if r.get('is_online') else 0))
             if ch["deleted_rows"] or ch["edited_rows"] or ch["added_rows"]: st.rerun()
+
+    # T6 Anleitung
+    with t6:
+        st.subheader("📖 Anleitung & Workflow")
+        
+        with st.expander("1️⃣ Einrichtung (Einmalig)", expanded=True):
+            st.markdown("""
+            1. Gehe in der Sidebar (links) ganz unten zu **⚙️ Verwaltung**.
+            2. Erstelle deine Kategorien (z.B. *Lebensmittel, Miete, Urlaub*).
+            3. **WICHTIG:** Wenn eine Kategorie nur vom Konto abgeht (z.B. Miete, Netflix), setze den Haken bei **"Ist Fixkosten?"**. 
+               *Diese tauchen dann nicht im "Bar benötigt"-Rechner auf.*
+            4. Lege bei Bedarf ein **Standard-Budget** fest, um den Monatsstart zu beschleunigen.
+            """)
+            
+        with st.expander("2️⃣ Monatsanfang (Geld verteilen)", expanded=True):
+            st.markdown("""
+            1. Wähle in der Sidebar **💰 Verteiler**.
+            2. Wähle das Datum und den Ziel-Monat.
+            3. Die Tabelle ist mit deinen Standard-Budgets vorausgefüllt. Passe die Werte an.
+            4. Unten siehst du **"Bar benötigt"**. Das ist die Summe, die du am Automaten abheben musst (für deine Umschläge).
+            5. Klicke auf **"Budgets buchen"**. Alle SOLL-Werte sind nun im System.
+            """)
+            
+        with st.expander("3️⃣ Im Alltag (Ausgaben erfassen)", expanded=True):
+            st.markdown("""
+            1. Wähle in der Sidebar **📝 Neu**.
+            2. Wähle **IST (Ausgabe)**.
+            3. Gib Betrag und Kategorie ein.
+            4. **Hybrid-Check:**
+               * Hast du mit Bargeld aus dem Umschlag bezahlt? ➔ **Kein Haken**.
+               * Hast du mit Karte/PayPal/Uber bezahlt? ➔ **Setze Haken bei "💳 Online?"**.
+                 *(Das System merkt sich nun, dass du dieses Geld eigentlich noch bar im Umschlag hast, es aber auf das Konto muss)*.
+            """)
+            
+        with st.expander("4️⃣ Hybrid-System (Back to Bank)"):
+            st.markdown("""
+            Wenn du oft online zahlst, sammelt sich Bargeld in deinen Umschlägen, das eigentlich auf dem Konto fehlt.
+            1. Gehe in der Sidebar zu **🏦 Bank**.
+            2. Du siehst "Im Umschlag: X €".
+            3. Nimm genau diesen Betrag aus deinen variablen Umschlägen.
+            4. Zahle ihn am Automaten auf dein Konto ein.
+            5. Klicke in der App auf **"Als eingezahlt markieren"**. Der virtuelle "Back to Bank"-Topf ist nun wieder leer.
+            """)
+            
+        with st.expander("5️⃣ Sinking Funds (Sparziele)"):
+            st.markdown("""
+            1. Gehe zum Tab **🎯 Sparziele**.
+            2. Klicke in die Tabelle, um **Zielbetrag** und **Fälligkeitsdatum** einzutragen.
+            3. Die App berechnet dir automatisch, wie viel du monatlich sparen musst ("Rate").
+            4. Priorisiere Töpfe (A, B, C) in der Verwaltung, um die Liste zu sortieren.
+            """)
