@@ -269,21 +269,18 @@ with st.sidebar:
         # --- RESET ZONE ---
         st.divider()
         st.error("🚨 Daten zurücksetzen")
-        st.caption("Bereit für 2026? Hier kannst du aufräumen.")
-        
         confirm_reset = st.checkbox("Sicherheits-Haken setzen", key="reset_confirm")
         
         col_res1, col_res2 = st.columns(2)
         with col_res1:
-            if st.button("🧹 Nur Buchungen löschen", type="primary", disabled=not confirm_reset, help="Löscht alle Einnahmen/Ausgaben. Kategorien bleiben."):
+            if st.button("🧹 Nur Buchungen löschen", type="primary", disabled=not confirm_reset):
                 execute_db("DELETE FROM transactions")
-                # Reset Auto-Increment für saubere IDs
                 execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
-                st.toast("✅ Alle Buchungen gelöscht. Viel Erfolg in 2026!")
+                st.toast("✅ Alle Buchungen gelöscht.")
                 st.rerun()
         
         with col_res2:
-            if st.button("💥 Alles löschen (Factory)", type="primary", disabled=not confirm_reset, help="Löscht ALLES inkl. Kategorien."):
+            if st.button("💥 Alles löschen (Factory)", type="primary", disabled=not confirm_reset):
                 execute_db("DELETE FROM transactions")
                 execute_db("DELETE FROM categories")
                 execute_db("DELETE FROM sqlite_sequence")
@@ -298,64 +295,71 @@ else:
 
     # T1 Dashboard
     with t1:
-        col_m, col_cat = st.columns([1, 3])
-        m_opts = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
-        if not m_opts.empty:
-            sel_month = col_m.selectbox("Zeitraum", m_opts['Analyse_Monat'].unique(), label_visibility="collapsed")
-            sel_cats = col_cat.multiselect("Filter", current_categories, default=current_categories, label_visibility="collapsed", placeholder="Alle Kategorien")
-            
-            curr_key = m_opts[m_opts['Analyse_Monat'] == sel_month]['sort_key_month'].iloc[0]
-            mask_month = df['sort_key_month'] == curr_key
-            mask_prev = df['sort_key_month'] < curr_key
-            mask_type = df['type'].isin(['SOLL', 'IST'])
-            
-            df_curr = df[mask_month & mask_type].copy()
-            df_prev = df[mask_prev & mask_type].copy()
-            
-            prev_grp = df_prev.groupby(['category', 'type'])['amount'].sum().unstack(fill_value=0)
-            if 'SOLL' not in prev_grp: prev_grp['SOLL'] = 0
-            if 'IST' not in prev_grp: prev_grp['IST'] = 0
-            carryover = prev_grp['SOLL'] - prev_grp['IST']
-            
-            curr_grp = df_curr.groupby(['category', 'type'])['amount'].sum().unstack(fill_value=0)
-            if 'SOLL' not in curr_grp: curr_grp['SOLL'] = 0
-            if 'IST' not in curr_grp: curr_grp['IST'] = 0
-            
-            overview = pd.DataFrame({'Übertrag': carryover, 'Budget': curr_grp['SOLL'], 'Ausgaben': curr_grp['IST']}).fillna(0)
-            if sel_cats: overview = overview[overview.index.isin(sel_cats)]
-            else: overview = overview[overview.index.isin([])]
-            
-            overview['Gesamt'] = overview['Übertrag'] + overview['Budget']
-            overview['Rest'] = overview['Gesamt'] - overview['Ausgaben']
-            overview['Quote'] = (overview['Ausgaben'] / overview['Gesamt']).fillna(0)
-            overview = overview.merge(cat_df.set_index('name')[['priority', 'is_fixed']], left_index=True, right_index=True, how='left')
-            overview['priority'] = overview['priority'].fillna('Standard')
-            
-            sums = overview.sum(numeric_only=True)
-            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            kpi1.metric("Verfügbar (Gesamt)", format_euro(sums['Gesamt']), delta=f"Übertrag: {format_euro(sums['Übertrag'])}")
-            kpi2.metric("Ausgaben", format_euro(sums['Ausgaben']), delta=f"{sums['Quote']*100:.1f}%", delta_color="inverse")
-            kpi3.metric("Restbetrag", format_euro(sums['Rest']), delta_color="normal")
-            
-            b2b_month = df_curr[(df_curr['is_online']==1) & (df_curr['category'].isin(sel_cats))].merge(cat_df, left_on='category', right_on='name')
-            b2b_month_sum = b2b_month[b2b_month['is_fixed']==0]['amount'].sum()
-            if b2b_month_sum > 0: kpi4.warning(f"🏦 Zur Bank: {format_euro(b2b_month_sum)}", icon="💳")
-            else: kpi4.success("Keine Bank-Rücklage nötig", icon="✅")
+        if df.empty:
+            st.info("Noch keine Buchungen vorhanden. Nutze '📝 Neu' in der Sidebar.")
+        else:
+            col_m, col_cat = st.columns([1, 3])
+            m_opts = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
+            if not m_opts.empty:
+                sel_month = col_m.selectbox("Zeitraum", m_opts['Analyse_Monat'].unique(), label_visibility="collapsed")
+                sel_cats = col_cat.multiselect("Filter", current_categories, default=current_categories, label_visibility="collapsed", placeholder="Alle Kategorien")
+                
+                curr_key = m_opts[m_opts['Analyse_Monat'] == sel_month]['sort_key_month'].iloc[0]
+                mask_month = df['sort_key_month'] == curr_key
+                mask_prev = df['sort_key_month'] < curr_key
+                mask_type = df['type'].isin(['SOLL', 'IST'])
+                
+                df_curr = df[mask_month & mask_type].copy()
+                df_prev = df[mask_prev & mask_type].copy()
+                
+                prev_grp = df_prev.groupby(['category', 'type'])['amount'].sum().unstack(fill_value=0)
+                if 'SOLL' not in prev_grp: prev_grp['SOLL'] = 0
+                if 'IST' not in prev_grp: prev_grp['IST'] = 0
+                carryover = prev_grp['SOLL'] - prev_grp['IST']
+                
+                curr_grp = df_curr.groupby(['category', 'type'])['amount'].sum().unstack(fill_value=0)
+                if 'SOLL' not in curr_grp: curr_grp['SOLL'] = 0
+                if 'IST' not in curr_grp: curr_grp['IST'] = 0
+                
+                overview = pd.DataFrame({'Übertrag': carryover, 'Budget': curr_grp['SOLL'], 'Ausgaben': curr_grp['IST']}).fillna(0)
+                if sel_cats: overview = overview[overview.index.isin(sel_cats)]
+                else: overview = overview[overview.index.isin([])]
+                
+                overview['Gesamt'] = overview['Übertrag'] + overview['Budget']
+                overview['Rest'] = overview['Gesamt'] - overview['Ausgaben']
+                overview['Quote'] = (overview['Ausgaben'] / overview['Gesamt']).fillna(0)
+                overview = overview.merge(cat_df.set_index('name')[['priority', 'is_fixed']], left_index=True, right_index=True, how='left')
+                overview['priority'] = overview['priority'].fillna('Standard')
+                
+                sums = overview.sum(numeric_only=True)
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                kpi1.metric("Verfügbar (Gesamt)", format_euro(sums['Gesamt']), delta=f"Übertrag: {format_euro(sums['Übertrag'])}")
+                kpi2.metric("Ausgaben", format_euro(sums['Ausgaben']), delta=f"{sums['Quote']*100:.1f}%", delta_color="inverse")
+                kpi3.metric("Restbetrag", format_euro(sums['Rest']), delta_color="normal")
+                
+                b2b_month = df_curr[(df_curr['is_online']==1) & (df_curr['category'].isin(sel_cats))].merge(cat_df, left_on='category', right_on='name')
+                b2b_month_sum = b2b_month[b2b_month['is_fixed']==0]['amount'].sum()
+                if b2b_month_sum > 0: kpi4.warning(f"🏦 Zur Bank: {format_euro(b2b_month_sum)}", icon="💳")
+                else: kpi4.success("Keine Bank-Rücklage nötig", icon="✅")
 
-            st.markdown("### 📋 Budget Übersicht")
-            overview = overview.sort_values(by=['priority', 'Rest'], ascending=[True, False])
-            cfg = {"Quote": st.column_config.ProgressColumn("Status", format="%.0f%%", min_value=0, max_value=1), "Übertrag": st.column_config.NumberColumn(format="%.2f €"), "Budget": st.column_config.NumberColumn(format="%.2f €"), "Gesamt": st.column_config.NumberColumn(format="%.2f €"), "Ausgaben": st.column_config.NumberColumn(format="%.2f €"), "Rest": st.column_config.NumberColumn(format="%.2f €"), "is_fixed": st.column_config.CheckboxColumn("Fix", width="small")}
-            st.dataframe(overview[['priority', 'is_fixed', 'Übertrag', 'Budget', 'Gesamt', 'Ausgaben', 'Rest', 'Quote']], use_container_width=True, column_config=cfg, height=500)
-            
-            with st.expander("🔎 Einzelbuchungen ansehen"):
-                trans_show = df_curr[df_curr['category'].isin(overview.index)].copy()
-                trans_show['Mode'] = trans_show['is_online'].apply(lambda x: "💳" if x==1 else "💵")
-                st.dataframe(trans_show[['date', 'category', 'description', 'amount', 'type', 'Mode']].sort_values(by='date', ascending=False), use_container_width=True, column_config={"amount": st.column_config.NumberColumn(format="%.2f €"), "date": st.column_config.DateColumn(format="DD.MM.YYYY")}, hide_index=True)
+                st.markdown("### 📋 Budget Übersicht")
+                overview = overview.sort_values(by=['priority', 'Rest'], ascending=[True, False])
+                cfg = {"Quote": st.column_config.ProgressColumn("Status", format="%.0f%%", min_value=0, max_value=1), "Übertrag": st.column_config.NumberColumn(format="%.2f €"), "Budget": st.column_config.NumberColumn(format="%.2f €"), "Gesamt": st.column_config.NumberColumn(format="%.2f €"), "Ausgaben": st.column_config.NumberColumn(format="%.2f €"), "Rest": st.column_config.NumberColumn(format="%.2f €"), "is_fixed": st.column_config.CheckboxColumn("Fix", width="small")}
+                st.dataframe(overview[['priority', 'is_fixed', 'Übertrag', 'Budget', 'Gesamt', 'Ausgaben', 'Rest', 'Quote']], use_container_width=True, column_config=cfg, height=500)
+                
+                with st.expander("🔎 Einzelbuchungen ansehen"):
+                    trans_show = df_curr[df_curr['category'].isin(overview.index)].copy()
+                    trans_show['Mode'] = trans_show['is_online'].apply(lambda x: "💳" if x==1 else "💵")
+                    st.dataframe(trans_show[['date', 'category', 'description', 'amount', 'type', 'Mode']].sort_values(by='date', ascending=False), use_container_width=True, column_config={"amount": st.column_config.NumberColumn(format="%.2f €"), "date": st.column_config.DateColumn(format="DD.MM.YYYY")}, hide_index=True)
 
     # T2 Sinking Funds
     with t2:
         st.subheader("🎯 Sparziele & Sinking Funds")
-        sf_calc = df[df['type'].isin(['SOLL', 'IST'])].groupby('category')['amount'].apply(lambda x: x[df['type']=='SOLL'].sum() - x[df['type']=='IST'].sum())
+        # Hier checken wir df NICHT auf empty, da sf_calc auch mit leerem df funktioniert (ergibt 0)
+        sf_calc = pd.Series(dtype=float)
+        if not df.empty:
+            sf_calc = df[df['type'].isin(['SOLL', 'IST'])].groupby('category')['amount'].apply(lambda x: x[df['type']=='SOLL'].sum() - x[df['type']=='IST'].sum())
+        
         sf_df = cat_df.set_index('name').copy()
         sf_df['Aktuell'] = sf_calc
         sf_df['Aktuell'] = sf_df['Aktuell'].fillna(0.0)
@@ -401,36 +405,45 @@ else:
     # T3 Analyse
     with t3:
         st.subheader("Ausgaben Analyse")
-        df_ist = df[df['type'] == 'IST'].copy()
-        c1, c2 = st.columns(2)
-        with c1:
-            fig_pie = px.pie(df_ist, values='amount', names='category', title='Ausgaben nach Kategorie', hole=0.4)
-            st.plotly_chart(fig_pie, use_container_width=True)
-        with c2:
-            df_bar = df_ist.groupby(['budget_month', 'category'])['amount'].sum().reset_index()
-            fig_bar = px.bar(df_bar, x='budget_month', y='amount', color='category', title='Verlauf')
-            st.plotly_chart(fig_bar, use_container_width=True)
+        if df.empty:
+            st.info("Keine Daten für Analyse.")
+        else:
+            df_ist = df[df['type'] == 'IST'].copy()
+            if df_ist.empty:
+                st.info("Noch keine Ausgaben getätigt.")
+            else:
+                c1, c2 = st.columns(2)
+                with c1:
+                    fig_pie = px.pie(df_ist, values='amount', names='category', title='Ausgaben nach Kategorie', hole=0.4)
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                with c2:
+                    df_bar = df_ist.groupby(['budget_month', 'category'])['amount'].sum().reset_index()
+                    fig_bar = px.bar(df_bar, x='budget_month', y='amount', color='category', title='Verlauf')
+                    st.plotly_chart(fig_bar, use_container_width=True)
 
     # T4 Vergleich
     with t4:
         st.subheader("Vergleichsrechner")
-        periods = sorted(df['Analyse_Monat'].unique(), reverse=True)
-        if len(periods) > 1:
-            c1, c2 = st.columns(2)
-            p1 = c1.selectbox("Basis", periods, index=0)
-            p2 = c2.selectbox("Vergleich mit", periods, index=1)
-            
-            def get_sums(p):
-                key = m_opts[m_opts['Analyse_Monat'] == p]['sort_key_month'].iloc[0]
-                d = df[(df['sort_key_month'] == key) & (df['type'] == 'IST')]
-                return d.groupby('category')['amount'].sum()
-            
-            s1 = get_sums(p1)
-            s2 = get_sums(p2)
-            comp = pd.DataFrame({'Basis': s1, 'Vgl': s2}).fillna(0)
-            comp['Diff'] = comp['Basis'] - comp['Vgl']
-            st.dataframe(comp.style.format("{:.2f} €").background_gradient(cmap="RdYlGn_r", subset=['Diff']), use_container_width=True)
-        else: st.info("Nicht genügend Daten für Vergleich.")
+        if df.empty:
+            st.info("Keine Daten.")
+        else:
+            periods = sorted(df['Analyse_Monat'].unique(), reverse=True)
+            if len(periods) > 1:
+                c1, c2 = st.columns(2)
+                p1 = c1.selectbox("Basis", periods, index=0)
+                p2 = c2.selectbox("Vergleich mit", periods, index=1)
+                
+                def get_sums(p):
+                    key = m_opts[m_opts['Analyse_Monat'] == p]['sort_key_month'].iloc[0]
+                    d = df[(df['sort_key_month'] == key) & (df['type'] == 'IST')]
+                    return d.groupby('category')['amount'].sum()
+                
+                s1 = get_sums(p1)
+                s2 = get_sums(p2)
+                comp = pd.DataFrame({'Basis': s1, 'Vgl': s2}).fillna(0)
+                comp['Diff'] = comp['Basis'] - comp['Vgl']
+                st.dataframe(comp.style.format("{:.2f} €").background_gradient(cmap="RdYlGn_r", subset=['Diff']), use_container_width=True)
+            else: st.info("Nicht genügend Daten für Vergleich.")
 
     # T5 Editor
     with t5:
