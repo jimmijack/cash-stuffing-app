@@ -431,7 +431,6 @@ else:
                 k2.metric("Ausgaben", format_euro(s['Ausgaben']), delta=f"{s['Quote']*100:.1f}%", delta_color="inverse")
                 k3.metric("Rest", format_euro(s['Rest']), delta_color="normal")
                 
-                # B2B Calculation for Dashboard
                 b2b = d_c[(d_c['is_online']==1) & (d_c['category'].isin(sel_c))].merge(cat_df, left_on='category', right_on='name')
                 b2b_s = b2b[(b2b['is_fixed']==0) & (b2b['is_cashless']==0)]['amount'].sum()
                 
@@ -489,15 +488,8 @@ else:
         sfd['Info'] = re[1]
         sfd['Progress'] = (sfd['Aktuell']/sfd['target_amount']).fillna(0).clip(0,1)
         
-        # --- NEU: Gesamtrate berechnen und anzeigen ---
-        # Nur aktive Raten zählen (wo Ziel > 0 und noch nicht erreicht)
-        # Die Rate ist float in Spalte 'Rate'. Falls es ein String ist (Fehlerfall?), ignorieren wir es.
-        # Hier ist 'Rate' float, da cr() float zurückgibt.
-        # Aber cr() kann (target-curr) zurückgeben, was float ist.
-        
+        # Live Rate
         total_monthly_need = sfd[sfd['target_amount'] > 0]['Rate'].sum()
-        
-        # Prio Summen
         prio_sums = sfd[sfd['target_amount'] > 0].groupby('priority')['Rate'].sum()
         sum_a = prio_sums.get('A - Hoch', 0.0)
         sum_b = prio_sums.get('B - Mittel', 0.0)
@@ -508,10 +500,7 @@ else:
         kc2.metric("Prio A (Hoch)", format_euro(sum_a))
         kc3.metric("Prio B (Mittel)", format_euro(sum_b))
         kc4.metric("Prio C (Niedrig)", format_euro(sum_c))
-        
-        st.info("💡 Wenn du diesen Monat nichts einzahlst, steigt die notwendige Rate im nächsten Monat automatisch an.")
         st.divider()
-        # ---------------------------------------------
         
         for p in PRIO_OPTIONS:
             g = sfd[sfd['priority'] == p].reset_index()
@@ -536,8 +525,14 @@ else:
                         nt = ch.get("target_amount", g.iloc[i]['target_amount'])
                         nd = ch.get("due_date", g.iloc[i]['due_date'])
                         nn = ch.get("notes", g.iloc[i]['notes'])
-                        if isinstance(nd, (datetime.datetime, pd.Timestamp)): nd = nd.strftime("%Y-%m-%d")
-                        elif pd.isnull(nd): nd = None
+                        
+                        # --- FIX DATE SAVE ---
+                        if pd.isnull(nd): 
+                            nd = None
+                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): 
+                            nd = nd.strftime("%Y-%m-%d")
+                        # ---------------------
+                        
                         execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
                     st.rerun()
 
@@ -589,7 +584,10 @@ else:
                 for i, v in chg["edited_rows"].items():
                     sid = subs_df.iloc[i]['id']
                     for k, val in v.items():
-                        if k == 'start_date' and isinstance(val, (datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
+                        # FIX DATE
+                        if k == 'start_date':
+                            if pd.isnull(val): val = None
+                            elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
                         execute_db(f"UPDATE subscriptions SET {k}=? WHERE id=?", (val, int(sid)))
                 if chg["added_rows"]:
                     for row in chg["added_rows"]:
@@ -663,7 +661,10 @@ else:
                 for i, v in chg["edited_rows"].items():
                     lid = loans_df.iloc[i]['id']
                     for k, val in v.items():
-                        if k == 'start_date' and isinstance(val, (datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
+                        # FIX DATE
+                        if k == 'start_date':
+                            if pd.isnull(val): val = None
+                            elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
                         execute_db(f"UPDATE loans SET {k}=? WHERE id=?", (val, int(lid)))
                 if chg["added_rows"]:
                     for row in chg["added_rows"]:
@@ -711,6 +712,10 @@ else:
             for i, v in ch["edited_rows"].items():
                 rid = de.iloc[i]['id']
                 for k, val in v.items():
+                    # FIX DATE
+                    if k == 'date':
+                        if pd.isnull(val): val = None
+                        elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
                     if k=='is_online': val=1 if val else 0
                     execute_db(f"UPDATE transactions SET {k}=? WHERE id=?", (val, int(rid)))
             for r in ch["added_rows"]:
