@@ -152,7 +152,7 @@ st.title("💶 Cash Stuffing Planer")
 
 with st.sidebar:
     st.markdown("### 🧭 Navigation")
-    # "Tools" hier entfernt, jetzt eigener Tab
+    # Tools Tab entfernt, ist jetzt Haupt-Tab
     sb_mode = st.segmented_control("Menü", ["📝 Neu", "💰 Verteiler", "💸 Transfer", "🏦 Bank", "📉 Kredite", "🔄 Abos"], selection_mode="single", default="📝 Neu")
     st.divider()
 
@@ -192,9 +192,9 @@ with st.sidebar:
                     st.rerun()
             else: st.error("Keine Kategorien.")
 
-    # 2. VERTEILER
+    # 2. VERTEILER (NEU MIT STÜCKELUNG)
     elif sb_mode == "💰 Verteiler":
-        st.subheader("Budget Verteiler")
+        st.subheader("Budget Verteiler & Stückelung")
         bulk_date = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
         today = date.today()
         nm = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
@@ -202,47 +202,106 @@ with st.sidebar:
         bulk_target_sel = st.radio("Ziel", [opt1, opt2], horizontal=True)
         bulk_month = today.strftime("%Y-%m") if bulk_target_sel == opt1 else nm.strftime("%Y-%m")
 
+        # Session State Initialisierung
         if "bulk_df" not in st.session_state or len(st.session_state.bulk_df) != len(cat_df):
+            # Wir bauen eine Matrix auf
             temp = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].copy()
-            temp.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Betrag']
+            temp.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Rest_Betrag']
+            
+            # Neue Spalten für Scheine
+            temp['50er'] = 0
+            temp['20er'] = 0
+            temp['10er'] = 0
+            temp['5er'] = 0
+            
+            # Initialer Restbetrag ist das Default Budget
+            # Wenn Fix oder Cashless, dann bleibt Rest_Betrag voll.
+            # Wenn Cash, dann sollte man es eigentlich auf Scheine aufteilen. 
+            # Wir lassen es erstmal in Rest, User verteilt es dann.
+            
             st.session_state.bulk_df = temp
 
-        st.caption("Werte basieren auf deinen Standard-Budgets.")
+        st.caption("Verteile deine Scheine pro Kategorie. Fixkosten/Online kommen in 'Rest'.")
+        
+        # Berechnung der Summe pro Zeile
+        calc_df = st.session_state.bulk_df.copy()
+        calc_df['Summe'] = (calc_df['50er']*50) + (calc_df['20er']*20) + (calc_df['10er']*10) + (calc_df['5er']*5) + calc_df['Rest_Betrag']
+        
+        # Data Editor Konfiguration
         edited = st.data_editor(
-            st.session_state.bulk_df,
+            calc_df,
             column_config={
                 "Kategorie": st.column_config.TextColumn(disabled=True),
-                "Betrag": st.column_config.NumberColumn("Betrag (€)", format="%.2f", min_value=0),
-                "is_fixed": st.column_config.CheckboxColumn("Fix?", disabled=True, width="small"),
-                "is_cashless": st.column_config.CheckboxColumn("Karte?", disabled=True, width="small")
+                "is_fixed": st.column_config.CheckboxColumn("Fix", disabled=True, width="small"),
+                "is_cashless": st.column_config.CheckboxColumn("Karte", disabled=True, width="small"),
+                "50er": st.column_config.NumberColumn("50€", min_value=0, step=1, width="small"),
+                "20er": st.column_config.NumberColumn("20€", min_value=0, step=1, width="small"),
+                "10er": st.column_config.NumberColumn("10€", min_value=0, step=1, width="small"),
+                "5er": st.column_config.NumberColumn("5€", min_value=0, step=1, width="small"),
+                "Rest_Betrag": st.column_config.NumberColumn("Rest / Digital €", min_value=0.0, format="%.2f", step=1.0),
+                "Summe": st.column_config.NumberColumn("Gesamt €", format="%.2f", disabled=True),
+                # Versteckte Spalten
+                "default_budget": None
             },
-            hide_index=True, use_container_width=True, height=400
+            column_order=["Kategorie", "is_fixed", "is_cashless", "50er", "20er", "10er", "5er", "Rest_Betrag", "Summe"],
+            hide_index=True, use_container_width=True, height=500
         )
         
-        total = edited["Betrag"].sum()
-        fixed_sum = edited[edited['is_fixed']==1]['Betrag'].sum()
-        cashless_var_sum = edited[(edited['is_fixed']==0) & (edited['is_cashless']==1)]['Betrag'].sum()
-        account_sum = fixed_sum + cashless_var_sum
-        cash_sum = total - account_sum
+        # Sync back to session state to keep edits alive on interaction
+        st.session_state.bulk_df = edited[['Kategorie', 'is_fixed', 'is_cashless', 'Rest_Betrag', '50er', '20er', '10er', '5er']]
+
+        total_budget = edited["Summe"].sum()
+        
+        # Zusammenfassung Scheine (Nur für nicht-fixe, nicht-cashless Kategorien, oder einfach alles was in den Spalten steht)
+        # Wir zählen einfach stur was in den Spalten steht, das ist am ehrlichsten.
+        sum_50 = edited['50er'].sum()
+        sum_20 = edited['20er'].sum()
+        sum_10 = edited['10er'].sum()
+        sum_5 = edited['5er'].sum()
+        
+        cash_total = (sum_50*50) + (sum_20*20) + (sum_10*10) + (sum_5*5)
+        digital_total = edited['Rest_Betrag'].sum() # Hier sind Fixkosten und krumme Beträge drin
         
         st.divider()
-        c1, c2 = st.columns(2)
-        c1.metric("Gesamt Budget", format_euro(total))
-        c2.metric("Bar abheben", format_euro(cash_sum), help="Nur variable Kosten, ohne Karte/Fix")
-        st.caption(f"Auf Konto: {format_euro(account_sum)}")
+        st.markdown(f"**Gesamt-Budget: {format_euro(total_budget)}**")
         
-        if st.button("Buchen", type="primary", use_container_width=True):
-            if total > 0:
+        col_res1, col_res2 = st.columns(2)
+        with col_res1:
+            st.info(f"🏦 **Vom Konto / Digital:** {format_euro(digital_total)}")
+        with col_res2:
+            st.success(f"💵 **Am Automaten abheben:** {format_euro(cash_total)}")
+            st.markdown(f"""
+            *   **{sum_50}x** 50 €
+            *   **{sum_20}x** 20 €
+            *   **{sum_10}x** 10 €
+            *   **{sum_5}x** 5 €
+            """)
+        
+        if st.button("Budgets buchen & Stückelung speichern", type="primary", use_container_width=True):
+            if total_budget > 0:
                 c = 0
                 for _, row in edited.iterrows():
-                    if row["Betrag"] > 0:
+                    row_sum = (row['50er']*50) + (row['20er']*20) + (row['10er']*10) + (row['5er']*5) + row['Rest_Betrag']
+                    if row_sum > 0:
                         execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
-                                   (bulk_date, row["Kategorie"], "Verteiler", row["Betrag"], "SOLL", bulk_month, 0))
+                                   (bulk_date, row["Kategorie"], "Verteiler", row_sum, "SOLL", bulk_month, 0))
                         c += 1
-                st.success(f"✅ {c} Budgets gebucht!")
-                st.session_state.bulk_df = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].rename(columns={'name':'Kategorie', 'default_budget':'Betrag'})
+                
+                # Speichere die Stückelung in die Historie (denominations Tabelle)
+                if cash_total > 0:
+                    execute_db("INSERT INTO denominations (date, total_amount, c50, c20, c10, c5) VALUES (?,?,?,?,?,?)",
+                               (bulk_date.strftime("%Y-%m-%d"), cash_total, int(sum_50), int(sum_20), int(sum_10), int(sum_5)))
+                
+                st.success(f"✅ {c} Budgets gebucht und Stückelung gespeichert!")
+                
+                # Reset
+                temp_reset = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].copy()
+                temp_reset.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Rest_Betrag']
+                temp_reset['50er']=0; temp_reset['20er']=0; temp_reset['10er']=0; temp_reset['5er']=0
+                st.session_state.bulk_df = temp_reset
                 st.rerun()
-            else: st.warning("Summe ist 0.")
+            else:
+                st.warning("Summe ist 0.")
 
     # 3. TRANSFER
     elif sb_mode == "💸 Transfer":
@@ -493,7 +552,6 @@ else:
     # T2 Sinking
     with tab_sf:
         st.subheader("🎯 Sparziele")
-        
         sfc = pd.Series(dtype=float)
         if not df.empty:
             sfc = df[df['type'].isin(['SOLL','IST'])].groupby('category')['amount'].apply(lambda x: x[df['type']=='SOLL'].sum() - x[df['type']=='IST'].sum())
@@ -560,12 +618,8 @@ else:
                         nd = ch.get("due_date", g.iloc[i]['due_date'])
                         nn = ch.get("notes", g.iloc[i]['notes'])
                         
-                        # --- FIX DATE SAVE ---
-                        if pd.isnull(nd): 
-                            nd = None
-                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): 
-                            nd = nd.strftime("%Y-%m-%d")
-                        # ---------------------
+                        if pd.isnull(nd): nd = None
+                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): nd = nd.strftime("%Y-%m-%d")
                         
                         execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
                     st.rerun()
@@ -618,7 +672,6 @@ else:
                 for i, v in chg["edited_rows"].items():
                     sid = subs_df.iloc[i]['id']
                     for k, val in v.items():
-                        # FIX DATE
                         if k == 'start_date':
                             if pd.isnull(val): val = None
                             elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
@@ -695,7 +748,6 @@ else:
                 for i, v in chg["edited_rows"].items():
                     lid = loans_df.iloc[i]['id']
                     for k, val in v.items():
-                        # FIX DATE
                         if k == 'start_date':
                             if pd.isnull(val): val = None
                             elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
@@ -746,7 +798,6 @@ else:
             for i, v in ch["edited_rows"].items():
                 rid = de.iloc[i]['id']
                 for k, val in v.items():
-                    # FIX DATE
                     if k == 'date':
                         if pd.isnull(val): val = None
                         elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
@@ -760,62 +811,17 @@ else:
     # T8 Money
     with tab_money:
         st.subheader("🧮 Scheine Rechner & Historie")
-        
-        # Teil 1: Rechner
-        col_calc, col_hist = st.columns([1,1])
-        
-        with col_calc:
-            st.markdown("#### Neuer Abhebung")
-            target_val = st.number_input("Betrag abheben (€)", min_value=0, value=0, step=50)
+        denoms = get_data("SELECT * FROM denominations ORDER BY date DESC")
+        if not denoms.empty:
+            denoms['date'] = pd.to_datetime(denoms['date'])
+            # Chart
+            fig = px.bar(denoms, x='date', y=['c50','c20','c10','c5'], title="Historie Scheine")
+            st.plotly_chart(fig, use_container_width=True)
             
-            # Auto Calc
-            notes = [200, 100, 50, 20, 10, 5]
-            default_counts = {}
-            rem = target_val
-            for n in notes:
-                c = int(rem // n)
-                if c > 0:
-                    default_counts[n] = c
-                    rem -= c * n
-            
-            # Manual Adjust
-            user_counts = {}
-            st.caption("Stückelung anpassen:")
-            for n in notes:
-                user_counts[n] = st.number_input(f"{n} € Scheine", min_value=0, value=default_counts.get(n, 0), key=f"note_{n}")
-            
-            # Check
-            total_user = sum([k*v for k,v in user_counts.items()])
-            diff = target_val - total_user
-            
-            if diff == 0 and target_val > 0:
-                st.success(f"Summe passt: {format_euro(total_user)}")
-                if st.button("💾 Speichern & Tracken"):
-                    # Save to DB
-                    cols = "date, total_amount, " + ", ".join([f"c{k}" for k in notes])
-                    vals = [date.today().strftime("%Y-%m-%d"), target_val] + [user_counts[n] for n in notes]
-                    q = f"INSERT INTO denominations ({cols}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                    execute_db(q, tuple(vals))
-                    st.toast("Gespeichert!")
-                    st.rerun()
-            elif target_val > 0:
-                st.warning(f"Differenz: {format_euro(diff)}")
-        
-        # Teil 2: Historie
-        with col_hist:
-            st.markdown("#### Historie")
-            denoms = get_data("SELECT * FROM denominations ORDER BY date DESC LIMIT 10")
-            if not denoms.empty:
-                st.dataframe(denoms[['date', 'total_amount']], hide_index=True)
-                
-                # Chart transform
-                # Melt for stacked bar
-                denoms['date'] = pd.to_datetime(denoms['date'])
-                melted = denoms.melt(id_vars=['date'], value_vars=[f"c{n}" for n in notes], var_name='Schein', value_name='Anzahl')
-                fig = px.bar(melted, x='date', y='Anzahl', color='Schein', title="Schein-Verteilung")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Noch keine Daten.")
+            st.markdown("##### Letzte Abhebungen")
+            st.dataframe(denoms, hide_index=True, use_container_width=True)
+        else:
+            st.info("Noch keine Stückelung gespeichert (via Verteiler).")
 
     # T9 Anleitung
     with tab_help:
@@ -831,9 +837,9 @@ else:
         with st.expander("2️⃣ Monatsanfang (Geld verteilen)"):
             st.markdown("""
             1. **💰 Verteiler**: Wähle den Monat.
-            2. "Budgets buchen" erstellt die SOLL-Einträge.
-            3. **Bar abheben**: Zeigt dir exakt, wie viel Bargeld du für deine Umschläge brauchst (exklusive Fixkosten und bargeldlose Budgets).
-            4. **🧮 Scheine**: Berechne hier, welche Scheine du am Automaten ziehen musst, und speichere die Abhebung.
+            2. Trage in die Spalten (50er, 20er...) ein, wie viele Scheine du für den Umschlag brauchst.
+            3. Bei Fixkosten oder Online-Budgets trage den Betrag einfach bei "Rest/Digital" ein.
+            4. "Budgets buchen" erstellt die SOLL-Einträge und speichert deine Schein-Liste.
             """)
             
         with st.expander("3️⃣ Hybrid-System & Ausgaben"):
