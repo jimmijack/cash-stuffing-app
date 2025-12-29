@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import datetime
+import io
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
@@ -171,7 +172,7 @@ with st.sidebar:
                     default_chk = True if (is_fixed_cat or is_cashless_cat) else False
                     is_online = st.checkbox("💳 Online / Karte?", value=default_chk) 
                 
-                if st.form_submit_button("Speichern", use_container_width=True):
+                if st.form_submit_button("Speichern", use_container_width=True): # Hier container_width angepasst
                     execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
                                (date_input, cat_input, desc_input, amt_input, "SOLL" if "SOLL" in type_input else "IST", budget_target, 1 if is_online else 0))
                     st.toast("✅ Gespeichert!")
@@ -202,7 +203,7 @@ with st.sidebar:
                 "is_fixed": st.column_config.CheckboxColumn("Fix?", disabled=True, width="small"),
                 "is_cashless": st.column_config.CheckboxColumn("Karte?", disabled=True, width="small")
             },
-            hide_index=True, use_container_width=True, height=400
+            hide_index=True, use_container_width=True, height=400 # use_container_width statt width
         )
         
         total = edited["Betrag"].sum()
@@ -431,6 +432,7 @@ else:
                 k2.metric("Ausgaben", format_euro(s['Ausgaben']), delta=f"{s['Quote']*100:.1f}%", delta_color="inverse")
                 k3.metric("Rest", format_euro(s['Rest']), delta_color="normal")
                 
+                # B2B Calculation for Dashboard
                 b2b = d_c[(d_c['is_online']==1) & (d_c['category'].isin(sel_c))].merge(cat_df, left_on='category', right_on='name')
                 b2b_s = b2b[(b2b['is_fixed']==0) & (b2b['is_cashless']==0)]['amount'].sum()
                 
