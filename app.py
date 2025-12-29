@@ -10,10 +10,12 @@ import plotly.express as px
 # --- 1. KONFIGURATION & CSS ---
 st.set_page_config(page_title="Cash Stuffing Planer", layout="wide", page_icon="💶")
 
-# Custom CSS
+# Custom CSS - Theme Aware & Tab Styling
 st.markdown("""
     <style>
         .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
+        
+        /* Metrik-Boxen stylen */
         div[data-testid="stMetric"] {
             background-color: var(--secondary-background-color);
             border: 1px solid rgba(128, 128, 128, 0.2);
@@ -21,8 +23,32 @@ st.markdown("""
             border-radius: 8px;
             color: var(--text-color);
         }
+        
+        /* Tabellen Header (Index verstecken) */
         thead tr th:first-child {display:none}
         tbody th {display:none}
+        
+        /* --- TAB STYLING (Reiter) --- */
+        /* Container der Tabs */
+        div[data-baseweb="tab-list"] {
+            gap: 5px;
+        }
+        
+        /* Einzelner Tab */
+        button[data-baseweb="tab"] {
+            font-size: 18px !important; /* Größere Schrift */
+            font-weight: 600 !important;
+            border: 1px solid rgba(128, 128, 128, 0.2) !important; /* Rahmen */
+            border-radius: 5px 5px 0 0 !important;
+            padding: 10px 20px !important;
+            background-color: var(--secondary-background-color);
+        }
+        
+        /* Aktiver Tab */
+        button[data-baseweb="tab"][aria-selected="true"] {
+            border-bottom: 2px solid #ff4b4b !important; /* Streamlit Rot als Akzent */
+            background-color: var(--background-color);
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -183,7 +209,7 @@ with st.sidebar:
             st.session_state.bulk_df,
             column_config={
                 "Kategorie": st.column_config.TextColumn(disabled=True),
-                "Betrag": st.column_config.NumberColumn(format="%.2f", min_value=0),
+                "Betrag": st.column_config.NumberColumn("Betrag (€)", format="%.2f", min_value=0),
                 "is_fixed": st.column_config.CheckboxColumn("Fix?", disabled=True, width="small"),
                 "is_cashless": st.column_config.CheckboxColumn("Karte?", disabled=True, width="small")
             },
@@ -337,23 +363,12 @@ with st.sidebar:
 
 # --- MAIN TABS ---
 if df.empty and not current_categories:
-    # Nur ein Tab wenn leer
-    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
+    # 8 Tabs
+    t1, t2, t3, t8, t4, t5, t6, t7 = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
     st.info("Start: Lege in der Sidebar Kategorien an.")
 else:
-    # NEUE REIHENFOLGE HIER
-    # 1. Dashboard (Daily)
-    # 2. Sparziele (Monthly Planning)
-    # 3. Analyse (Insights)
-    # 4. Abos (Fixkosten Check)
-    # 5. Kredite (Schulden Check - seltener)
-    # 6. Vergleich (Historie)
-    # 7. Daten (Admin)
-    # 8. Anleitung
-    
-    tab_dash, tab_sf, tab_ana, tab_subs, tab_loans, tab_comp, tab_data, tab_help = st.tabs([
-        "📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Editor", "📖 Hilfe"
-    ])
+    # 8 Tabs
+    tab_dash, tab_sf, tab_ana, tab_subs, tab_loans, tab_comp, tab_data, tab_help = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "📖 Hilfe"])
 
     # T1 Dashboard
     with tab_dash:
@@ -488,7 +503,17 @@ else:
             if not g.empty:
                 st.markdown(f"**{p}**")
                 ek = f"sf_{p}"
-                ed = st.data_editor(g, key=ek, use_container_width=True, hide_index=True, column_order=["name","Aktuell","target_amount","due_date","Progress","Rate","Info","notes"], column_config={"name": st.column_config.TextColumn(disabled=True), "Aktuell": st.column_config.NumberColumn(format="%.2f €", disabled=True), "target_amount": st.column_config.NumberColumn(format="%.2f €", required=True), "due_date": st.column_config.DateColumn(format="DD.MM.YYYY"), "Progress": st.column_config.ProgressColumn(format="%.0f%%"), "Rate": st.column_config.NumberColumn(format="%.2f €", disabled=True), "Info": st.column_config.TextColumn(disabled=True)})
+                col_cfg = {
+                    "name": st.column_config.TextColumn("Kategorie", disabled=True),
+                    "Aktuell": st.column_config.NumberColumn("Ist-Stand", format="%.2f €", disabled=True),
+                    "target_amount": st.column_config.NumberColumn("Zielbetrag (€)", format="%.2f €", required=True),
+                    "due_date": st.column_config.DateColumn("Fällig am", format="DD.MM.YYYY"),
+                    "Progress": st.column_config.ProgressColumn("Fortschritt", format="%.0f%%"),
+                    "Rate": st.column_config.NumberColumn("Sparrate/Monat", format="%.2f €", disabled=True),
+                    "Info": st.column_config.TextColumn("Zeitraum", disabled=True),
+                    "notes": st.column_config.TextColumn("Notiz")
+                }
+                ed = st.data_editor(g, key=ek, use_container_width=True, hide_index=True, column_order=["name","Aktuell","target_amount","due_date","Progress","Rate","Info","notes"], column_config=col_cfg)
                 
                 if st.session_state[ek]["edited_rows"]:
                     for i, ch in st.session_state[ek]["edited_rows"].items():
@@ -531,7 +556,16 @@ else:
             c1.metric("Monatliche Belastung (Ø)", format_euro(subs_df['Monatlich'].sum()))
             c2.metric("Jährliche Gesamtkosten", format_euro(subs_df['Monatlich'].sum() * 12))
             
-            sub_cfg = {"id": st.column_config.NumberColumn(disabled=True), "name": st.column_config.TextColumn("Anbieter"), "amount": st.column_config.NumberColumn("Kosten", format="%.2f €"), "cycle": st.column_config.SelectboxColumn("Turnus", options=CYCLE_OPTIONS), "category": st.column_config.SelectboxColumn("Kategorie", options=[""]+current_categories), "start_date": st.column_config.DateColumn("Startdatum"), "notice_period": st.column_config.TextColumn("Kündigungsfrist"), "Monatlich": st.column_config.NumberColumn("Ø Monat", format="%.2f €", disabled=True)}
+            sub_cfg = {
+                "id": st.column_config.NumberColumn(disabled=True), 
+                "name": st.column_config.TextColumn("Anbieter"), 
+                "amount": st.column_config.NumberColumn("Kosten (€)", format="%.2f €"), 
+                "cycle": st.column_config.SelectboxColumn("Turnus", options=CYCLE_OPTIONS), 
+                "category": st.column_config.SelectboxColumn("Kategorie", options=[""]+current_categories), 
+                "start_date": st.column_config.DateColumn("Startdatum"), 
+                "notice_period": st.column_config.TextColumn("Kündigungsfrist"), 
+                "Monatlich": st.column_config.NumberColumn("Ø Monat", format="%.2f €", disabled=True)
+            }
             edited_subs = st.data_editor(subs_df, key="sub_editor", hide_index=True, use_container_width=True, column_config=sub_cfg, column_order=["name", "amount", "cycle", "Monatlich", "category", "start_date", "notice_period"], num_rows="dynamic")
             
             if st.session_state["sub_editor"]:
@@ -582,13 +616,35 @@ else:
             c1.metric("Monatliche Belastung", format_euro(loans_df[loans_df['Rest'] > 0]['monthly_payment'].sum()))
             c2.metric("Gesamtschulden (Rest)", format_euro(loans_df['Rest'].sum()))
             
-            loan_cfg = {"id": st.column_config.NumberColumn(disabled=True), "name": st.column_config.TextColumn("Kredit"), "start_date": st.column_config.DateColumn("Start"), "total_amount": st.column_config.NumberColumn("Nettokredit", format="%.2f €"), "interest_amount": st.column_config.NumberColumn("Zinsen €", format="%.2f €"), "Gesamt": st.column_config.NumberColumn("Bruttoschuld", format="%.2f €", disabled=True), "term_months": st.column_config.NumberColumn("Laufzeit (M)"), "monthly_payment": st.column_config.NumberColumn("Rate", format="%.2f €"), "Progress": st.column_config.ProgressColumn("Status", format="%.0f%%"), "Rest": st.column_config.NumberColumn("Restschuld", format="%.2f €", disabled=True), "Ende": st.column_config.DateColumn(format="DD.MM.YYYY", disabled=True), "Status": st.column_config.TextColumn(disabled=True)}
+            loan_cfg = {
+                "id": st.column_config.NumberColumn(disabled=True), 
+                "name": st.column_config.TextColumn("Kredit"), 
+                "start_date": st.column_config.DateColumn("Startdatum"), 
+                "total_amount": st.column_config.NumberColumn("Kreditsumme (€)", format="%.2f €"), 
+                "interest_amount": st.column_config.NumberColumn("Zinsen gesamt (€)", format="%.2f €"), 
+                "Gesamt": st.column_config.NumberColumn("Bruttoschuld (€)", format="%.2f €", disabled=True), 
+                "term_months": st.column_config.NumberColumn("Laufzeit (Monate)"), 
+                "monthly_payment": st.column_config.NumberColumn("Rate (€)", format="%.2f €"), 
+                "Progress": st.column_config.ProgressColumn("Fortschritt", format="%.0f%%"), 
+                "Rest": st.column_config.NumberColumn("Restschuld (€)", format="%.2f €", disabled=True), 
+                "Ende": st.column_config.DateColumn(format="DD.MM.YYYY", disabled=True), 
+                "Status": st.column_config.TextColumn(disabled=True)
+            }
             
-            edited_loans = st.data_editor(loans_df, key="loan_editor", hide_index=True, use_container_width=True, column_config=loan_cfg, column_order=["name", "monthly_payment", "Rest", "Progress", "Gesamt", "interest_amount", "start_date", "term_months", "Ende"], num_rows="dynamic")
+            edited_loans = st.data_editor(
+                loans_df, 
+                key="loan_editor",
+                hide_index=True,
+                use_container_width=True,
+                column_config=loan_cfg,
+                column_order=["name", "monthly_payment", "Rest", "Progress", "Gesamt", "interest_amount", "start_date", "term_months", "Ende"],
+                num_rows="dynamic"
+            )
             
             if st.session_state["loan_editor"]:
                 chg = st.session_state["loan_editor"]
-                for i in chg["deleted_rows"]: execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
+                for i in chg["deleted_rows"]: 
+                    execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
                 for i, v in chg["edited_rows"].items():
                     lid = loans_df.iloc[i]['id']
                     for k, val in v.items():
@@ -622,7 +678,17 @@ else:
         st.subheader("Editor")
         de = get_data("SELECT * FROM transactions ORDER BY date DESC, id DESC")
         if not de.empty: de['date'] = pd.to_datetime(de['date'])
-        cf = {"id": st.column_config.NumberColumn(disabled=True), "date": st.column_config.DateColumn(format="DD.MM.YYYY"), "category": st.column_config.SelectboxColumn(options=current_categories + ["Back to Bank"]), "type": st.column_config.SelectboxColumn(options=["IST", "SOLL", "BANK_DEPOSIT"]), "amount": st.column_config.NumberColumn(format="%.2f €"), "is_online": st.column_config.CheckboxColumn()}
+        
+        cf = {
+            "id": st.column_config.NumberColumn(disabled=True), 
+            "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"), 
+            "category": st.column_config.SelectboxColumn("Kategorie", options=current_categories + ["Back to Bank"]), 
+            "type": st.column_config.SelectboxColumn("Typ", options=["IST", "SOLL", "BANK_DEPOSIT"]), 
+            "amount": st.column_config.NumberColumn("Betrag", format="%.2f €"), 
+            "is_online": st.column_config.CheckboxColumn("Online?"),
+            "budget_month": st.column_config.TextColumn("Budget-Monat"),
+            "description": st.column_config.TextColumn("Beschreibung")
+        }
         er = st.data_editor(de, hide_index=True, use_container_width=True, column_config=cf, key="me", num_rows="dynamic")
         
         if st.session_state["me"]:
