@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import datetime
-import io
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
@@ -75,6 +74,19 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, priority TEXT DEFAULT 'Standard', target_amount REAL DEFAULT 0.0, due_date TEXT, notes TEXT, is_fixed INTEGER DEFAULT 0, default_budget REAL DEFAULT 0.0, is_cashless INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS loans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, start_date TEXT, total_amount REAL, interest_amount REAL DEFAULT 0.0, term_months INTEGER, monthly_payment REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, cycle TEXT, category TEXT, start_date TEXT, notice_period TEXT)''')
+    
+    # NEU: Tabelle für Scheine-Historie
+    c.execute('''CREATE TABLE IF NOT EXISTS denominations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT,
+        total_amount REAL,
+        c200 INTEGER DEFAULT 0,
+        c100 INTEGER DEFAULT 0,
+        c50 INTEGER DEFAULT 0,
+        c20 INTEGER DEFAULT 0,
+        c10 INTEGER DEFAULT 0,
+        c5 INTEGER DEFAULT 0
+    )''')
 
     # Migrations
     try: c.execute("SELECT default_budget FROM categories LIMIT 1")
@@ -140,7 +152,8 @@ st.title("💶 Cash Stuffing Planer")
 
 with st.sidebar:
     st.markdown("### 🧭 Navigation")
-    sb_mode = st.segmented_control("Menü", ["📝 Neu", "💰 Verteiler", "💸 Transfer", "🏦 Bank", "🧮 Tools"], selection_mode="single", default="📝 Neu")
+    # "Tools" hier entfernt, jetzt eigener Tab
+    sb_mode = st.segmented_control("Menü", ["📝 Neu", "💰 Verteiler", "💸 Transfer", "🏦 Bank", "📉 Kredite", "🔄 Abos"], selection_mode="single", default="📝 Neu")
     st.divider()
 
     # 1. NEU
@@ -172,7 +185,7 @@ with st.sidebar:
                     default_chk = True if (is_fixed_cat or is_cashless_cat) else False
                     is_online = st.checkbox("💳 Online / Karte?", value=default_chk) 
                 
-                if st.form_submit_button("Speichern", use_container_width=True): # Hier container_width angepasst
+                if st.form_submit_button("Speichern", use_container_width=True):
                     execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
                                (date_input, cat_input, desc_input, amt_input, "SOLL" if "SOLL" in type_input else "IST", budget_target, 1 if is_online else 0))
                     st.toast("✅ Gespeichert!")
@@ -203,7 +216,7 @@ with st.sidebar:
                 "is_fixed": st.column_config.CheckboxColumn("Fix?", disabled=True, width="small"),
                 "is_cashless": st.column_config.CheckboxColumn("Karte?", disabled=True, width="small")
             },
-            hide_index=True, use_container_width=True, height=400 # use_container_width statt width
+            hide_index=True, use_container_width=True, height=400
         )
         
         total = edited["Betrag"].sum()
@@ -268,19 +281,38 @@ with st.sidebar:
                     st.rerun()
         else: st.success("Leer.")
 
-    # 7. TOOLS
-    elif sb_mode == "🧮 Tools":
-        st.subheader("Scheinrechner")
-        target_val = st.number_input("Betrag", min_value=0, value=500, step=50)
-        notes = [200, 100, 50, 20, 10, 5]
-        result = {}
-        remainder = target_val
-        for n in notes:
-            count = int(remainder // n)
-            if count > 0:
-                result[n] = count
-                remainder -= count * n
-        for n, c in result.items(): st.write(f"**{c}x** {n} €")
+    # 5. KREDITE (ADD)
+    elif sb_mode == "📉 Kredite":
+        st.subheader("Kredit hinzufügen")
+        with st.form("loan_add"):
+            l_name = st.text_input("Name (z.B. PayPal)")
+            l_sum = st.number_input("Kreditsumme (€)", min_value=0.0, step=50.0)
+            l_zins_sum = st.number_input("Zinsen Gesamt (€)", min_value=0.0, step=10.0)
+            l_rate = st.number_input("Rate (€/Monat)", min_value=0.0, step=10.0)
+            l_start = st.date_input("Datum der 1. Rate", date.today())
+            l_term = st.number_input("Laufzeit (Monate)", min_value=1, value=12)
+            
+            if st.form_submit_button("Kredit anlegen", use_container_width=True):
+                execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)",
+                           (l_name, l_start, l_sum, l_zins_sum, l_term, l_rate))
+                st.success("Gespeichert!")
+                st.rerun()
+
+    # 6. ABOS (NEU)
+    elif sb_mode == "🔄 Abos":
+        st.subheader("Abo hinzufügen")
+        with st.form("sub_add"):
+            s_name = st.text_input("Name (z.B. Netflix)")
+            s_cost = st.number_input("Kosten (€)", min_value=0.0, format="%.2f")
+            s_cycle = st.selectbox("Turnus", CYCLE_OPTIONS)
+            s_cat = st.selectbox("Kategorie (optional)", [""] + current_categories, index=0)
+            s_start = st.date_input("Startdatum (Optional)", date.today())
+            
+            if st.form_submit_button("Abo anlegen", use_container_width=True):
+                execute_db("INSERT INTO subscriptions (name, amount, cycle, category, start_date) VALUES (?,?,?,?,?)",
+                           (s_name, s_cost, s_cycle, s_cat, s_start))
+                st.success("Abo gespeichert!")
+                st.rerun()
 
     # --- SETTINGS ---
     st.markdown("---")
@@ -353,12 +385,12 @@ with st.sidebar:
 
 # --- MAIN TABS ---
 if df.empty and not current_categories:
-    # 8 Tabs
-    t1, t2, t3, t8, t4, t5, t6, t7 = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
+    # 9 Tabs
+    t1, t2, t3, t8, t4, t5, t6, t9, t7 = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📉 Kredite", "🔄 Abos", "📈 Analyse", "⚖️ Vergleich", "📝 Daten", "🧮 Scheine", "📖 Anleitung"])
     st.info("Start: Lege in der Sidebar Kategorien an.")
 else:
-    # 8 Tabs
-    tab_dash, tab_sf, tab_ana, tab_subs, tab_loans, tab_comp, tab_data, tab_help = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "📖 Hilfe"])
+    # 9 Tabs
+    tab_dash, tab_sf, tab_ana, tab_subs, tab_loans, tab_comp, tab_data, tab_money, tab_help = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "🧮 Scheine", "📖 Hilfe"])
 
     # T1 Dashboard
     with tab_dash:
@@ -725,7 +757,67 @@ else:
                            (r.get('date', date.today()), r.get('category', 'Sonstiges'), r.get('description', ''), r.get('amount', 0), r.get('type', 'IST'), r.get('budget_month', date.today().strftime('%Y-%m')), 1 if r.get('is_online') else 0))
             if ch["deleted_rows"] or ch["edited_rows"] or ch["added_rows"]: st.rerun()
 
-    # T8 Anleitung
+    # T8 Money
+    with tab_money:
+        st.subheader("🧮 Scheine Rechner & Historie")
+        
+        # Teil 1: Rechner
+        col_calc, col_hist = st.columns([1,1])
+        
+        with col_calc:
+            st.markdown("#### Neuer Abhebung")
+            target_val = st.number_input("Betrag abheben (€)", min_value=0, value=0, step=50)
+            
+            # Auto Calc
+            notes = [200, 100, 50, 20, 10, 5]
+            default_counts = {}
+            rem = target_val
+            for n in notes:
+                c = int(rem // n)
+                if c > 0:
+                    default_counts[n] = c
+                    rem -= c * n
+            
+            # Manual Adjust
+            user_counts = {}
+            st.caption("Stückelung anpassen:")
+            for n in notes:
+                user_counts[n] = st.number_input(f"{n} € Scheine", min_value=0, value=default_counts.get(n, 0), key=f"note_{n}")
+            
+            # Check
+            total_user = sum([k*v for k,v in user_counts.items()])
+            diff = target_val - total_user
+            
+            if diff == 0 and target_val > 0:
+                st.success(f"Summe passt: {format_euro(total_user)}")
+                if st.button("💾 Speichern & Tracken"):
+                    # Save to DB
+                    cols = "date, total_amount, " + ", ".join([f"c{k}" for k in notes])
+                    vals = [date.today().strftime("%Y-%m-%d"), target_val] + [user_counts[n] for n in notes]
+                    q = f"INSERT INTO denominations ({cols}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    execute_db(q, tuple(vals))
+                    st.toast("Gespeichert!")
+                    st.rerun()
+            elif target_val > 0:
+                st.warning(f"Differenz: {format_euro(diff)}")
+        
+        # Teil 2: Historie
+        with col_hist:
+            st.markdown("#### Historie")
+            denoms = get_data("SELECT * FROM denominations ORDER BY date DESC LIMIT 10")
+            if not denoms.empty:
+                st.dataframe(denoms[['date', 'total_amount']], hide_index=True)
+                
+                # Chart transform
+                # Melt for stacked bar
+                denoms['date'] = pd.to_datetime(denoms['date'])
+                melted = denoms.melt(id_vars=['date'], value_vars=[f"c{n}" for n in notes], var_name='Schein', value_name='Anzahl')
+                fig = px.bar(melted, x='date', y='Anzahl', color='Schein', title="Schein-Verteilung")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Noch keine Daten.")
+
+    # T9 Anleitung
     with tab_help:
         st.subheader("📖 Anleitung & Workflow")
         
@@ -741,6 +833,7 @@ else:
             1. **💰 Verteiler**: Wähle den Monat.
             2. "Budgets buchen" erstellt die SOLL-Einträge.
             3. **Bar abheben**: Zeigt dir exakt, wie viel Bargeld du für deine Umschläge brauchst (exklusive Fixkosten und bargeldlose Budgets).
+            4. **🧮 Scheine**: Berechne hier, welche Scheine du am Automaten ziehen musst, und speichere die Abhebung.
             """)
             
         with st.expander("3️⃣ Hybrid-System & Ausgaben"):
