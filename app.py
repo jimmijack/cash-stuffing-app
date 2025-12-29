@@ -213,15 +213,11 @@ with st.sidebar:
             temp['20er'] = 0
             temp['10er'] = 0
             temp['5er'] = 0
-            
-            # Initialer Restbetrag ist das Default Budget
-            # Wenn Fix oder Cashless, dann bleibt Rest_Betrag voll.
-            # Wenn Cash, dann sollte man es eigentlich auf Scheine aufteilen. 
-            # Wir lassen es erstmal in Rest, User verteilt es dann.
+            temp['Notiz'] = "" # Neue Spalte Notiz
             
             st.session_state.bulk_df = temp
 
-        st.caption("Verteile deine Scheine pro Kategorie. Fixkosten/Online kommen in 'Rest'.")
+        st.caption("Verteile deine Scheine pro Kategorie. 'Rest' ist für Online/Überweisung/Münzen.")
         
         # Berechnung der Summe pro Zeile
         calc_df = st.session_state.bulk_df.copy()
@@ -239,35 +235,35 @@ with st.sidebar:
                 "10er": st.column_config.NumberColumn("10€", min_value=0, step=1, width="small"),
                 "5er": st.column_config.NumberColumn("5€", min_value=0, step=1, width="small"),
                 "Rest_Betrag": st.column_config.NumberColumn("Rest / Digital €", min_value=0.0, format="%.2f", step=1.0),
+                "Notiz": st.column_config.TextColumn("Notizen", width="medium"),
                 "Summe": st.column_config.NumberColumn("Gesamt €", format="%.2f", disabled=True),
                 # Versteckte Spalten
                 "default_budget": None
             },
-            column_order=["Kategorie", "is_fixed", "is_cashless", "50er", "20er", "10er", "5er", "Rest_Betrag", "Summe"],
+            column_order=["Kategorie", "50er", "20er", "10er", "5er", "Rest_Betrag", "Summe", "Notiz"],
             hide_index=True, use_container_width=True, height=500
         )
         
         # Sync back to session state to keep edits alive on interaction
-        st.session_state.bulk_df = edited[['Kategorie', 'is_fixed', 'is_cashless', 'Rest_Betrag', '50er', '20er', '10er', '5er']]
+        st.session_state.bulk_df = edited[['Kategorie', 'is_fixed', 'is_cashless', 'Rest_Betrag', '50er', '20er', '10er', '5er', 'Notiz']]
 
         total_budget = edited["Summe"].sum()
         
-        # Zusammenfassung Scheine (Nur für nicht-fixe, nicht-cashless Kategorien, oder einfach alles was in den Spalten steht)
-        # Wir zählen einfach stur was in den Spalten steht, das ist am ehrlichsten.
+        # Zusammenfassung Scheine
         sum_50 = edited['50er'].sum()
         sum_20 = edited['20er'].sum()
         sum_10 = edited['10er'].sum()
         sum_5 = edited['5er'].sum()
         
         cash_total = (sum_50*50) + (sum_20*20) + (sum_10*10) + (sum_5*5)
-        digital_total = edited['Rest_Betrag'].sum() # Hier sind Fixkosten und krumme Beträge drin
+        digital_total = edited['Rest_Betrag'].sum() 
         
         st.divider()
         st.markdown(f"**Gesamt-Budget: {format_euro(total_budget)}**")
         
         col_res1, col_res2 = st.columns(2)
         with col_res1:
-            st.info(f"🏦 **Vom Konto / Digital:** {format_euro(digital_total)}")
+            st.info(f"🏦 **Vom Konto / Digital / Münzen:** {format_euro(digital_total)}")
         with col_res2:
             st.success(f"💵 **Am Automaten abheben:** {format_euro(cash_total)}")
             st.markdown(f"""
@@ -283,8 +279,13 @@ with st.sidebar:
                 for _, row in edited.iterrows():
                     row_sum = (row['50er']*50) + (row['20er']*20) + (row['10er']*10) + (row['5er']*5) + row['Rest_Betrag']
                     if row_sum > 0:
+                        # Notiz in Beschreibung übernehmen
+                        desc_text = "Verteiler"
+                        if row['Notiz'] and str(row['Notiz']).strip() != "":
+                            desc_text = f"Verteiler: {row['Notiz']}"
+                            
                         execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
-                                   (bulk_date, row["Kategorie"], "Verteiler", row_sum, "SOLL", bulk_month, 0))
+                                   (bulk_date, row["Kategorie"], desc_text, row_sum, "SOLL", bulk_month, 0))
                         c += 1
                 
                 # Speichere die Stückelung in die Historie (denominations Tabelle)
@@ -297,7 +298,7 @@ with st.sidebar:
                 # Reset
                 temp_reset = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].copy()
                 temp_reset.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Rest_Betrag']
-                temp_reset['50er']=0; temp_reset['20er']=0; temp_reset['10er']=0; temp_reset['5er']=0
+                temp_reset['50er']=0; temp_reset['20er']=0; temp_reset['10er']=0; temp_reset['5er']=0; temp_reset['Notiz']=""
                 st.session_state.bulk_df = temp_reset
                 st.rerun()
             else:
@@ -439,7 +440,7 @@ with st.sidebar:
                 execute_db("DELETE FROM transactions"); execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
                 st.rerun()
             if st.button("💥 Alles löschen", type="primary"):
-                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM subscriptions"); execute_db("DELETE FROM sqlite_sequence")
+                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM subscriptions"); execute_db("DELETE FROM sqlite_sequence"); execute_db("DELETE FROM denominations")
                 st.rerun()
 
 # --- MAIN TABS ---
@@ -618,8 +619,12 @@ else:
                         nd = ch.get("due_date", g.iloc[i]['due_date'])
                         nn = ch.get("notes", g.iloc[i]['notes'])
                         
-                        if pd.isnull(nd): nd = None
-                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): nd = nd.strftime("%Y-%m-%d")
+                        # --- FIX DATE SAVE ---
+                        if pd.isnull(nd): 
+                            nd = None
+                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): 
+                            nd = nd.strftime("%Y-%m-%d")
+                        # ---------------------
                         
                         execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
                     st.rerun()
@@ -672,6 +677,7 @@ else:
                 for i, v in chg["edited_rows"].items():
                     sid = subs_df.iloc[i]['id']
                     for k, val in v.items():
+                        # FIX DATE
                         if k == 'start_date':
                             if pd.isnull(val): val = None
                             elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
@@ -748,6 +754,7 @@ else:
                 for i, v in chg["edited_rows"].items():
                     lid = loans_df.iloc[i]['id']
                     for k, val in v.items():
+                        # FIX DATE
                         if k == 'start_date':
                             if pd.isnull(val): val = None
                             elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
@@ -775,7 +782,7 @@ else:
                 st.dataframe(cp.style.format("{:.2f} €").background_gradient(cmap="RdYlGn_r", subset=['Diff']), use_container_width=True)
             else: st.info("Zu wenig Daten.")
 
-    # T7 Editor
+    # T7 Data
     with tab_data:
         st.subheader("Editor")
         de = get_data("SELECT * FROM transactions ORDER BY date DESC, id DESC")
@@ -798,6 +805,7 @@ else:
             for i, v in ch["edited_rows"].items():
                 rid = de.iloc[i]['id']
                 for k, val in v.items():
+                    # FIX DATE
                     if k == 'date':
                         if pd.isnull(val): val = None
                         elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
