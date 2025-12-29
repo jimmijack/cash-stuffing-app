@@ -10,12 +10,10 @@ import plotly.express as px
 # --- 1. KONFIGURATION & CSS ---
 st.set_page_config(page_title="Cash Stuffing Planer", layout="wide", page_icon="💶")
 
-# Custom CSS - Theme Aware & Tab Styling
+# Custom CSS
 st.markdown("""
     <style>
         .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
-        
-        /* Metrik-Boxen stylen */
         div[data-testid="stMetric"] {
             background-color: var(--secondary-background-color);
             border: 1px solid rgba(128, 128, 128, 0.2);
@@ -23,30 +21,21 @@ st.markdown("""
             border-radius: 8px;
             color: var(--text-color);
         }
-        
-        /* Tabellen Header (Index verstecken) */
         thead tr th:first-child {display:none}
         tbody th {display:none}
         
-        /* --- TAB STYLING (Reiter) --- */
-        /* Container der Tabs */
-        div[data-baseweb="tab-list"] {
-            gap: 5px;
-        }
-        
-        /* Einzelner Tab */
+        /* Tab Styling */
+        div[data-baseweb="tab-list"] { gap: 5px; }
         button[data-baseweb="tab"] {
-            font-size: 18px !important; /* Größere Schrift */
+            font-size: 18px !important; 
             font-weight: 600 !important;
-            border: 1px solid rgba(128, 128, 128, 0.2) !important; /* Rahmen */
+            border: 1px solid rgba(128, 128, 128, 0.2) !important;
             border-radius: 5px 5px 0 0 !important;
             padding: 10px 20px !important;
             background-color: var(--secondary-background-color);
         }
-        
-        /* Aktiver Tab */
         button[data-baseweb="tab"][aria-selected="true"] {
-            border-bottom: 2px solid #ff4b4b !important; /* Streamlit Rot als Akzent */
+            border-bottom: 2px solid #ff4b4b !important;
             background-color: var(--background-color);
         }
     </style>
@@ -442,6 +431,7 @@ else:
                 k2.metric("Ausgaben", format_euro(s['Ausgaben']), delta=f"{s['Quote']*100:.1f}%", delta_color="inverse")
                 k3.metric("Rest", format_euro(s['Rest']), delta_color="normal")
                 
+                # B2B Calculation for Dashboard
                 b2b = d_c[(d_c['is_online']==1) & (d_c['category'].isin(sel_c))].merge(cat_df, left_on='category', right_on='name')
                 b2b_s = b2b[(b2b['is_fixed']==0) & (b2b['is_cashless']==0)]['amount'].sum()
                 
@@ -470,6 +460,7 @@ else:
     # T2 Sinking
     with tab_sf:
         st.subheader("🎯 Sparziele")
+        
         sfc = pd.Series(dtype=float)
         if not df.empty:
             sfc = df[df['type'].isin(['SOLL','IST'])].groupby('category')['amount'].apply(lambda x: x[df['type']=='SOLL'].sum() - x[df['type']=='IST'].sum())
@@ -497,6 +488,30 @@ else:
         sfd['Rate'] = re[0]
         sfd['Info'] = re[1]
         sfd['Progress'] = (sfd['Aktuell']/sfd['target_amount']).fillna(0).clip(0,1)
+        
+        # --- NEU: Gesamtrate berechnen und anzeigen ---
+        # Nur aktive Raten zählen (wo Ziel > 0 und noch nicht erreicht)
+        # Die Rate ist float in Spalte 'Rate'. Falls es ein String ist (Fehlerfall?), ignorieren wir es.
+        # Hier ist 'Rate' float, da cr() float zurückgibt.
+        # Aber cr() kann (target-curr) zurückgeben, was float ist.
+        
+        total_monthly_need = sfd[sfd['target_amount'] > 0]['Rate'].sum()
+        
+        # Prio Summen
+        prio_sums = sfd[sfd['target_amount'] > 0].groupby('priority')['Rate'].sum()
+        sum_a = prio_sums.get('A - Hoch', 0.0)
+        sum_b = prio_sums.get('B - Mittel', 0.0)
+        sum_c = prio_sums.get('C - Niedrig', 0.0)
+        
+        kc1, kc2, kc3, kc4 = st.columns(4)
+        kc1.metric("Notwendige Gesamtrate", format_euro(total_monthly_need), help="Summe aller monatlichen Sparraten um Ziele fristgerecht zu erreichen.")
+        kc2.metric("Prio A (Hoch)", format_euro(sum_a))
+        kc3.metric("Prio B (Mittel)", format_euro(sum_b))
+        kc4.metric("Prio C (Niedrig)", format_euro(sum_c))
+        
+        st.info("💡 Wenn du diesen Monat nichts einzahlst, steigt die notwendige Rate im nächsten Monat automatisch an.")
+        st.divider()
+        # ---------------------------------------------
         
         for p in PRIO_OPTIONS:
             g = sfd[sfd['priority'] == p].reset_index()
@@ -620,13 +635,13 @@ else:
                 "id": st.column_config.NumberColumn(disabled=True), 
                 "name": st.column_config.TextColumn("Kredit"), 
                 "start_date": st.column_config.DateColumn("Startdatum"), 
-                "total_amount": st.column_config.NumberColumn("Kreditsumme (€)", format="%.2f €"), 
+                "total_amount": st.column_config.NumberColumn("Nettokredit", format="%.2f €"), 
                 "interest_amount": st.column_config.NumberColumn("Zinsen gesamt (€)", format="%.2f €"), 
-                "Gesamt": st.column_config.NumberColumn("Bruttoschuld (€)", format="%.2f €", disabled=True), 
+                "Gesamt": st.column_config.NumberColumn("Bruttoschuld", format="%.2f €", disabled=True), 
                 "term_months": st.column_config.NumberColumn("Laufzeit (Monate)"), 
-                "monthly_payment": st.column_config.NumberColumn("Rate (€)", format="%.2f €"), 
-                "Progress": st.column_config.ProgressColumn("Fortschritt", format="%.0f%%"), 
-                "Rest": st.column_config.NumberColumn("Restschuld (€)", format="%.2f €", disabled=True), 
+                "monthly_payment": st.column_config.NumberColumn("Rate", format="%.2f €"), 
+                "Progress": st.column_config.ProgressColumn("Status", format="%.0f%%"), 
+                "Rest": st.column_config.NumberColumn("Restschuld", format="%.2f €", disabled=True), 
                 "Ende": st.column_config.DateColumn(format="DD.MM.YYYY", disabled=True), 
                 "Status": st.column_config.TextColumn(disabled=True)
             }
@@ -678,7 +693,6 @@ else:
         st.subheader("Editor")
         de = get_data("SELECT * FROM transactions ORDER BY date DESC, id DESC")
         if not de.empty: de['date'] = pd.to_datetime(de['date'])
-        
         cf = {
             "id": st.column_config.NumberColumn(disabled=True), 
             "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"), 
