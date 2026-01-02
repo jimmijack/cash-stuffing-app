@@ -53,6 +53,7 @@ DB_FILE = "/data/budget.db"
 
 DE_MONTHS = {1: "Januar", 2: "Februar", 3: "März", 4: "April", 5: "Mai", 6: "Juni", 7: "Juli", 8: "August", 9: "September", 10: "Oktober", 11: "November", 12: "Dezember"}
 DEFAULT_CATEGORIES = ["Lebensmittel", "Miete", "Sparen", "Freizeit", "Transport", "Sonstiges", "Fixkosten", "Kleidung", "Geschenke", "Notgroschen"]
+# Hier sind deine Gruppen inkl. Unterhalt
 FIXED_COST_GROUPS = ["Wohnkosten", "Versicherungen", "Abos/Software", "Telefon/Handy", "Mobilität", "Unterhalt", "Kredite", "Sonstiges"]
 PRIO_OPTIONS = ["A - Hoch", "B - Mittel", "C - Niedrig", "Standard"]
 CYCLE_OPTIONS = ["Monatlich", "Vierteljährlich", "Halbjährlich", "Jährlich"]
@@ -153,52 +154,51 @@ st.title("💶 Cash Stuffing Planer")
 # --- MAIN TABS ---
 if df.empty and not current_categories:
     # 9 Tabs
-    t_dash, t_book, t_dist, t_sf, t_subs, t_loan, t_fore, t_ana, t_adm = st.tabs(["📊 Übersicht", "📝 Buchen", "💰 Verteiler", "🎯 Ziele", "🔄 Abos", "📉 Kredite", "🔮 Prognose", "📈 Analyse", "⚙️ Admin"])
-    st.info("Start: Lege im Reiter '⚙️ Admin' Kategorien an.")
+    t1, t2, t3, t8, t4, t5, t6, t9, t7 = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "🧮 Scheine", "📖 Anleitung"])
+    st.info("Start: Lege im Reiter '⚙️ Admin' (ganz rechts/unten) Kategorien an.")
 else:
-    # 10 Tabs (Hilfe extra)
-    tab_dash, tab_book, tab_dist, tab_sf, tab_subs, tab_loans, tab_forecast, tab_ana, tab_admin, tab_money = st.tabs([
-        "📊 Übersicht", "📝 Buchen", "💰 Verteiler", "🎯 Ziele", "🔄 Abos", "📉 Kredite", "🔮 Prognose", "📈 Analyse", "⚙️ Admin", "🧮 Scheine"
-    ])
+    # 9 Tabs
+    tab_dash, tab_book, tab_dist, tab_sf, tab_subs, tab_loans, tab_forecast, tab_ana, tab_admin, tab_help = st.tabs(["📊 Übersicht", "📝 Buchen", "💰 Verteiler", "🎯 Ziele", "🔄 Abos", "📉 Kredite", "🔮 Prognose", "📈 Analyse", "⚙️ Admin", "📖 Hilfe"])
 
     # 1. DASHBOARD
     with tab_dash:
         # FIXKOSTEN RADAR
-        with st.expander("📌 Fixkosten & Belastungen (Monat)", expanded=False):
-            l_df = get_data("SELECT * FROM loans")
-            loan_monthly = 0.0
-            if not l_df.empty:
-                l_df['start_date'] = pd.to_datetime(l_df['start_date'], errors='coerce')
-                today = date.today()
-                def is_active(row):
-                    if pd.isnull(row['start_date']): return False
-                    end_date = (row['start_date'] + relativedelta(months=int(row['term_months']))).date()
-                    return today <= end_date
-                
-                l_df_clean = l_df.dropna(subset=['start_date']).copy()
-                if not l_df_clean.empty:
-                    active_loans = l_df_clean[l_df_clean.apply(is_active, axis=1)]
-                    loan_monthly = active_loans['monthly_payment'].sum()
+        st.markdown("##### 📌 Fixkosten (Monat)")
+        
+        l_df = get_data("SELECT * FROM loans")
+        loan_monthly = 0.0
+        if not l_df.empty:
+            l_df['start_date'] = pd.to_datetime(l_df['start_date'], errors='coerce')
+            today = date.today()
+            def is_active(row):
+                if pd.isnull(row['start_date']): return False
+                end_date = (row['start_date'] + relativedelta(months=int(row['term_months']))).date()
+                return today <= end_date
+            
+            l_df_clean = l_df.dropna(subset=['start_date']).copy()
+            if not l_df_clean.empty:
+                active_loans = l_df_clean[l_df_clean.apply(is_active, axis=1)]
+                loan_monthly = active_loans['monthly_payment'].sum()
 
-            s_df = get_data("SELECT * FROM subscriptions")
-            sub_monthly = 0.0
-            if not s_df.empty:
-                def get_m_cost(r):
-                    a = r['amount']
-                    if r['cycle'] == "Jährlich": return a/12
-                    if r['cycle'] == "Halbjährlich": return a/6
-                    if r['cycle'] == "Vierteljährlich": return a/3
-                    return a
-                sub_monthly = s_df.apply(get_m_cost, axis=1).sum()
+        s_df = get_data("SELECT * FROM subscriptions")
+        sub_monthly = 0.0
+        if not s_df.empty:
+            def get_m_cost(r):
+                a = r['amount']
+                if r['cycle'] == "Jährlich": return a/12
+                if r['cycle'] == "Halbjährlich": return a/6
+                if r['cycle'] == "Vierteljährlich": return a/3
+                return a
+            sub_monthly = s_df.apply(get_m_cost, axis=1).sum()
 
-            cf1, cf2, cf3 = st.columns(3)
-            cf1.metric("Ø Abos", format_euro(sub_monthly))
-            cf2.metric("Kredite", format_euro(loan_monthly))
-            cf3.metric("Fixlast Gesamt", format_euro(sub_monthly + loan_monthly), delta="Muss verdient werden", delta_color="off")
+        cf1, cf2, cf3 = st.columns(3)
+        cf1.metric("Ø Abos", format_euro(sub_monthly))
+        cf2.metric("Kredite", format_euro(loan_monthly))
+        cf3.metric("Fixlast Gesamt", format_euro(sub_monthly + loan_monthly), delta="Muss verdient werden", delta_color="off")
         
         st.divider()
         
-        if df.empty: st.info("Keine Daten für Budget. Gehe zu 'Verteiler' oder 'Buchen'.")
+        if df.empty: st.info("Keine Daten für Budget.")
         else:
             col_m, col_cat = st.columns([1, 3])
             m_opts = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
@@ -236,6 +236,7 @@ else:
                 k2.metric("Ausgaben", format_euro(s['Ausgaben']), delta=f"{s['Quote']*100:.1f}%", delta_color="inverse")
                 k3.metric("Rest", format_euro(s['Rest']), delta_color="normal")
                 
+                # B2B Calculation for Dashboard
                 b2b = d_c[(d_c['is_online']==1) & (d_c['category'].isin(sel_c))].merge(cat_df, left_on='category', right_on='name')
                 b2b_s = b2b[(b2b['is_fixed']==0) & (b2b['is_cashless']==0)]['amount'].sum()
                 
@@ -483,7 +484,7 @@ else:
                         execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
                     st.rerun()
 
-    # 5. ABOS (NEU SEPARAT)
+    # 5. ABOS
     with tab_subs:
         st.subheader("🔄 Abos & Verträge")
         subs_df = get_data("SELECT * FROM subscriptions")
@@ -504,7 +505,6 @@ else:
             st.divider()
 
         # Liste / Editor
-        grp_opts = FIXED_COST_GROUPS
         ed_subs = st.data_editor(
             subs_df,
             key="sub_editor_main",
@@ -514,7 +514,8 @@ else:
             column_config={
                 "id": None,
                 "name": st.column_config.TextColumn("Name", required=True),
-                "category": st.column_config.SelectboxColumn("Gruppe", options=grp_opts),
+                # Verwende FIXED_COST_GROUPS als Optionen
+                "category": st.column_config.SelectboxColumn("Gruppe", options=FIXED_COST_GROUPS),
                 "amount": st.column_config.NumberColumn("Betrag", format="%.2f €", required=True),
                 "cycle": st.column_config.SelectboxColumn("Turnus", options=CYCLE_OPTIONS),
                 "start_date": st.column_config.DateColumn("Start"),
@@ -548,72 +549,119 @@ else:
         # --- EINGABE BEREICH FÜR KREDITE ---
         with st.expander("➕ Neuen Kredit anlegen"):
             with st.form("new_loan_form", clear_on_submit=True):
-                nl_name = st.text_input("Name")
+                nl_name = st.text_input("Kredit Name")
                 nl_sum = st.number_input("Summe (Netto)", min_value=0.0)
                 nl_start = st.date_input("Start", date.today())
                 nl_months = st.number_input("Laufzeit (M)", min_value=1, value=12)
-                st.write("Basis:")
-                calc_mode = st.radio("Methode", ["Rate", "Zins %", "Zins €"], horizontal=True)
-                nl_val = st.number_input("Wert", min_value=0.0)
                 
-                if st.form_submit_button("Speichern"):
+                st.write("Berechnungsgrundlage:")
+                calc_mode = st.radio("Methode", ["Monatliche Rate", "Zins % (p.a.)", "Zinssumme €"], horizontal=True)
+                nl_val = st.number_input("Wert (Rate/Zins)", min_value=0.0)
+                
+                if st.form_submit_button("Kredit speichern"):
                     rate = 0.0; int_sum = 0.0
-                    if calc_mode == "Rate":
+                    if calc_mode == "Monatliche Rate":
                         rate = nl_val; total_pay = rate * nl_months; int_sum = max(0, total_pay - nl_sum)
-                    elif calc_mode == "Zins %":
+                    elif calc_mode == "Zins % (p.a.)":
                         monthly_i = (nl_val / 100) / 12
                         rate = nl_sum * (monthly_i * (1 + monthly_i)**nl_months) / ((1 + monthly_i)**nl_months - 1) if monthly_i > 0 else nl_sum/nl_months
                         int_sum = (rate * nl_months) - nl_sum
-                    elif calc_mode == "Zins €":
+                    elif calc_mode == "Zinssumme €":
                         int_sum = nl_val; rate = (nl_sum + int_sum) / nl_months
                         
                     execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)",
                                (nl_name, nl_start, nl_sum, int_sum, nl_months, rate))
-                    st.success("OK"); st.rerun()
+                    st.success("Kredit angelegt!")
+                    st.rerun()
         # -----------------------------------------------
 
         if not loans_df.empty:
             loans_df['start_date'] = pd.to_datetime(loans_df['start_date'], errors='coerce')
+            
+            # SAFE Calculation Function
             def calc_loan(row):
                 try:
-                    if pd.isnull(row['start_date']): return "Fehler", 0.0, 0.0, date.today(), 0.0
+                    if pd.isnull(row['start_date']) or pd.isnull(row['total_amount']):
+                        # Fallback for empty row during editing
+                        return "In Bearbeitung", 0.0, 0.0, date.today(), 0.0
+                        
                     total_liability = (row['total_amount'] or 0.0) + (row.get('interest_amount') or 0.0)
+                    
+                    # Safe Date Conversion
                     start = row['start_date'].date() if hasattr(row['start_date'], 'date') else row['start_date']
                     today = date.today()
-                    if today < start: months_passed = 0
-                    else: months_passed = (today.year - start.year) * 12 + (today.month - start.month) + 1 
+                    
+                    if today < start:
+                        months_passed = 0
+                    else:
+                        months_passed = (today.year - start.year) * 12 + (today.month - start.month) + 1 
+                    
                     term = int(row['term_months'] or 12)
                     if months_passed > term: months_passed = term
-                    paid_so_far = months_passed * (row['monthly_payment'] or 0.0)
+                    
+                    rate = row['monthly_payment'] or 0.0
+                    paid_so_far = months_passed * rate
                     if paid_so_far > total_liability: paid_so_far = total_liability
+                    
                     remaining = total_liability - paid_so_far
                     progress = paid_so_far / total_liability if total_liability > 0 else 0.0
+                    
                     end_date = start + relativedelta(months=term)
                     status = "✅ Bezahlt" if remaining <= 0.01 else f"{int(term - months_passed)} Raten"
+                    
                     return status, progress, remaining, end_date, total_liability
-                except: return "Error", 0,0, date.today(), 0
+                except:
+                    return "Fehler", 0.0, 0.0, date.today(), 0.0
 
             res = loans_df.apply(calc_loan, axis=1, result_type='expand')
-            loans_df['Status'] = res[0]; loans_df['Progress'] = res[1]; loans_df['Rest'] = res[2]; loans_df['Ende'] = res[3]; loans_df['Gesamt'] = res[4]
+            loans_df['Status'] = res[0]
+            loans_df['Progress'] = res[1]
+            loans_df['Rest'] = res[2]
+            loans_df['Ende'] = res[3]
+            loans_df['Gesamt'] = res[4]
             
             c1, c2 = st.columns(2)
             c1.metric("Monatliche Belastung", format_euro(loans_df[loans_df['Rest'] > 0]['monthly_payment'].sum()))
-            c2.metric("Gesamtschulden", format_euro(loans_df['Rest'].sum()))
+            c2.metric("Gesamtschulden (Rest)", format_euro(loans_df['Rest'].sum()))
             
-            lc = {"id": None, "name": "Kredit", "start_date": st.column_config.DateColumn("Start"), "total_amount": st.column_config.NumberColumn("Netto", format="%.2f €"), "interest_amount": st.column_config.NumberColumn("Zins", format="%.2f €"), "Gesamt": st.column_config.NumberColumn("Brutto", format="%.2f €", disabled=True), "term_months": st.column_config.NumberColumn("Laufzeit"), "monthly_payment": st.column_config.NumberColumn("Rate", format="%.2f €"), "Progress": st.column_config.ProgressColumn("%"), "Rest": st.column_config.NumberColumn("Rest", format="%.2f €", disabled=True), "Ende": st.column_config.DateColumn(format="DD.MM.YY", disabled=True), "Status": st.column_config.TextColumn(disabled=True)}
+            loan_cfg = {
+                "id": st.column_config.NumberColumn(disabled=True), 
+                "name": st.column_config.TextColumn("Kredit"), 
+                "start_date": st.column_config.DateColumn("Startdatum"), 
+                "total_amount": st.column_config.NumberColumn("Nettokredit", format="%.2f €"), 
+                "interest_amount": st.column_config.NumberColumn("Zinsen gesamt (€)", format="%.2f €"), 
+                "Gesamt": st.column_config.NumberColumn("Bruttoschuld", format="%.2f €", disabled=True), 
+                "term_months": st.column_config.NumberColumn("Laufzeit (Monate)"), 
+                "monthly_payment": st.column_config.NumberColumn("Rate", format="%.2f €"), 
+                "Progress": st.column_config.ProgressColumn("Status", format="%.0f%%"), 
+                "Rest": st.column_config.NumberColumn("Restschuld", format="%.2f €", disabled=True), 
+                "Ende": st.column_config.DateColumn(format="DD.MM.YYYY", disabled=True), 
+                "Status": st.column_config.TextColumn(disabled=True)
+            }
             
-            el = st.data_editor(loans_df, key="le", hide_index=True, use_container_width=True, column_config=lc, column_order=["name","monthly_payment","Rest","Progress","Gesamt","interest_amount","start_date","term_months"], num_rows="dynamic")
+            edited_loans = st.data_editor(
+                loans_df, 
+                key="loan_editor",
+                hide_index=True,
+                use_container_width=True,
+                column_config=loan_cfg,
+                column_order=["name", "monthly_payment", "Rest", "Progress", "Gesamt", "interest_amount", "start_date", "term_months", "Ende"],
+                num_rows="dynamic"
+            )
             
-            if st.session_state["le"]:
-                ch = st.session_state["le"]
-                for i in ch["deleted_rows"]: execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
-                for i, v in ch["edited_rows"].items():
+            if st.session_state["loan_editor"]:
+                chg = st.session_state["loan_editor"]
+                for i in chg["deleted_rows"]: 
+                    execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
+                for i, v in chg["edited_rows"].items():
                     lid = loans_df.iloc[i]['id']
                     for k, val in v.items():
                         if k == 'start_date' and isinstance(val, (datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
                         execute_db(f"UPDATE loans SET {k}=? WHERE id=?", (val, int(lid)))
-                for r in ch["added_rows"]: execute_db("INSERT INTO loans (name, start_date, total_amount, term_months, monthly_payment) VALUES (?,?,?,?,?)", (r.get("name","Neu"), date.today(), 0, 12, 0))
-                if ch["deleted_rows"] or ch["edited_rows"] or ch["added_rows"]: st.rerun()
+                if chg["added_rows"]:
+                    for row in chg["added_rows"]:
+                        execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)", (row.get("name","Neu"), row.get("start_date",date.today()), row.get("total_amount",0), row.get("interest_amount",0), row.get("term_months",12), row.get("monthly_payment",0)))
+                if chg["deleted_rows"] or chg["edited_rows"] or chg["added_rows"]: st.rerun()
 
     # 7. PROGNOSE (REDUZIERT AUF CHART + Einnahmen)
     with tab_forecast:
@@ -785,3 +833,14 @@ else:
             if st.button("Alles löschen", type="primary"):
                 execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM subscriptions"); execute_db("DELETE FROM sqlite_sequence"); execute_db("DELETE FROM denominations"); execute_db("DELETE FROM incomes")
                 st.rerun()
+
+    # T8 Anleitung
+    with tab_help:
+        st.subheader("📖 Anleitung")
+        st.markdown("""
+        **1. Admin:** Lege Kategorien an.
+        **2. Verteiler:** Zum Monatsstart.
+        **3. Buchen:** Trage Ausgaben ein. "Karte?" anhaken bei Online-Zahlung.
+        **4. Fixkosten:** Trage Abos und Einnahmen ein für die Prognose.
+        **5. Kredite:** Erfasse Ratenzahlungen.
+        """)
