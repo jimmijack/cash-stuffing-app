@@ -7,35 +7,41 @@ from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
 import plotly.express as px
 
-# --- 1. KONFIGURATION & CSS (Desktop Standard) ---
+# --- 1. KONFIGURATION & CSS ---
 st.set_page_config(page_title="Cash Stuffing Planer", layout="wide", page_icon="💶")
 
-# Custom CSS - Nur kosmetische Anpassungen für Boxen, kein Layout-Shift
+# Custom CSS
 st.markdown("""
     <style>
-        /* Metrik-Boxen stylen */
+        /* Container Abstände */
+        .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
+        
+        /* Metrik-Boxen */
         div[data-testid="stMetric"] {
-            background-color: #f8f9fa;
+            background-color: var(--secondary-background-color);
             border: 1px solid rgba(128, 128, 128, 0.2);
             padding: 10px;
             border-radius: 8px;
-            color: #31333F;
+            color: var(--text-color);
         }
-        /* Darkmode Anpassung für Metriken */
-        @media (prefers-color-scheme: dark) {
-            div[data-testid="stMetric"] {
-                background-color: #262730;
-                color: #FAFAFA;
-            }
-        }
-        /* Tabellen Index verstecken */
+        
+        /* Tabellen Header verstecken (Index) */
         thead tr th:first-child {display:none}
         tbody th {display:none}
         
-        /* Reiter etwas größer */
+        /* Tab Styling */
+        div[data-baseweb="tab-list"] { gap: 5px; }
         button[data-baseweb="tab"] {
-            font-size: 16px !important;
+            font-size: 16px !important; 
             font-weight: 600 !important;
+            border: 1px solid rgba(128, 128, 128, 0.2) !important;
+            border-radius: 5px 5px 0 0 !important;
+            padding: 8px 16px !important;
+            background-color: var(--secondary-background-color);
+        }
+        button[data-baseweb="tab"][aria-selected="true"] {
+            border-bottom: 2px solid #ff4b4b !important;
+            background-color: var(--background-color);
         }
     </style>
 """, unsafe_allow_html=True)
@@ -75,7 +81,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, cycle TEXT, category TEXT, start_date TEXT, notice_period TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS denominations (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, total_amount REAL, c200 INTEGER DEFAULT 0, c100 INTEGER DEFAULT 0, c50 INTEGER DEFAULT 0, c20 INTEGER DEFAULT 0, c10 INTEGER DEFAULT 0, c5 INTEGER DEFAULT 0)''')
 
-    # Migrations (Sicherstellen, dass alle Spalten da sind)
+    # Migrations
     try: c.execute("SELECT default_budget FROM categories LIMIT 1")
     except: c.execute("ALTER TABLE categories ADD COLUMN default_budget REAL DEFAULT 0.0")
     try: c.execute("SELECT interest_amount FROM loans LIMIT 1")
@@ -122,6 +128,7 @@ def get_categories_full():
     cols = ['is_fixed', 'is_cashless', 'default_budget']
     for col in cols:
         if col not in df.columns: df[col] = 0
+        
     df['is_fixed'] = df['is_fixed'].fillna(0).astype(int)
     df['is_cashless'] = df['is_cashless'].fillna(0).astype(int)
     return df
@@ -129,18 +136,17 @@ def get_categories_full():
 try: init_db()
 except: pass
 
-# --- UI ---
+# --- UI START ---
 df = load_main_data()
 cat_df = get_categories_full()
 current_categories = cat_df['name'].tolist() if not cat_df.empty else []
 
 st.title("💶 Cash Stuffing Planer")
 
-# --- SIDEBAR: EINGABEN ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.markdown("### 🧭 Menü")
-    # Klassisches Radio Button Menü oder Segmented Control in der Sidebar
-    sb_mode = st.radio("Aktion wählen", ["📝 Neuer Eintrag", "💰 Budget Verteiler", "💸 Umbuchung", "🏦 Back to Bank", "🧮 Scheinrechner"], label_visibility="collapsed")
+    sb_mode = st.radio("Navigation", ["📝 Neuer Eintrag", "💰 Budget Verteiler", "💸 Umbuchung", "🏦 Back to Bank", "🧮 Scheinrechner"], label_visibility="collapsed")
     st.divider()
 
     # 1. NEU
@@ -171,7 +177,7 @@ with st.sidebar:
                 is_online = False
                 if "IST" in type_input:
                     default_chk = True if (is_fixed_cat or is_cashless_cat) else False
-                    is_online = st.checkbox("💳 Online / Karte?", value=default_chk, help="Geld bleibt im Umschlag, muss zur Bank")
+                    is_online = st.checkbox("💳 Online / Karte?", value=default_chk)
                 
                 if st.form_submit_button("Speichern", use_container_width=True):
                     execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
@@ -180,9 +186,9 @@ with st.sidebar:
                     st.rerun()
             else: st.error("Bitte erst Kategorien anlegen!")
 
-    # 2. VERTEILER (Zurück in Sidebar, ohne Stückelung für den Anfang um Platz zu sparen, oder kompakt)
+    # 2. VERTEILER
     elif sb_mode == "💰 Budget Verteiler":
-        st.subheader("Budget Verteiler")
+        st.subheader("Budget & Scheine")
         bulk_date = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
         today = date.today()
         nm = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
@@ -192,39 +198,66 @@ with st.sidebar:
 
         if "bulk_df" not in st.session_state or len(st.session_state.bulk_df) != len(cat_df):
             temp = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].copy()
-            temp.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Betrag']
+            temp.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Rest_Betrag']
+            temp['50er'] = 0; temp['20er'] = 0; temp['10er'] = 0; temp['5er'] = 0; temp['Notiz'] = ""
             st.session_state.bulk_df = temp
 
-        st.caption("Standard-Budgets anpassen:")
+        st.caption("Verteilung:")
+        
+        calc_df = st.session_state.bulk_df.copy()
+        calc_df['Summe'] = (calc_df['50er']*50) + (calc_df['20er']*20) + (calc_df['10er']*10) + (calc_df['5er']*5) + calc_df['Rest_Betrag']
+        
         edited = st.data_editor(
-            st.session_state.bulk_df,
+            calc_df,
             column_config={
                 "Kategorie": st.column_config.TextColumn(disabled=True),
-                "Betrag": st.column_config.NumberColumn(format="%.2f", min_value=0),
-                "is_fixed": st.column_config.CheckboxColumn("Fix?", disabled=True, width="small"),
-                "is_cashless": st.column_config.CheckboxColumn("Karte?", disabled=True, width="small")
+                "is_fixed": st.column_config.CheckboxColumn("Fix", disabled=True, width="small"),
+                "is_cashless": st.column_config.CheckboxColumn("Krt", disabled=True, width="small"),
+                "50er": st.column_config.NumberColumn("50", min_value=0, step=1, width="small"),
+                "20er": st.column_config.NumberColumn("20", min_value=0, step=1, width="small"),
+                "10er": st.column_config.NumberColumn("10", min_value=0, step=1, width="small"),
+                "5er": st.column_config.NumberColumn("5", min_value=0, step=1, width="small"),
+                "Rest_Betrag": st.column_config.NumberColumn("Rest/Dig.", min_value=0.0, format="%.2f"),
+                "Summe": st.column_config.NumberColumn("∑", format="%.2f", disabled=True),
+                "default_budget": None
             },
-            hide_index=True, use_container_width=True, height=400
+            column_order=["Kategorie", "50er", "20er", "10er", "5er", "Rest_Betrag", "Summe", "Notiz"],
+            hide_index=True, use_container_width=True, height=500
         )
         
-        total = edited["Betrag"].sum()
-        fixed_sum = edited[edited['is_fixed']==1]['Betrag'].sum()
-        cashless_sum = edited[(edited['is_fixed']==0) & (edited['is_cashless']==1)]['Betrag'].sum()
-        cash_sum = total - fixed_sum - cashless_sum
+        st.session_state.bulk_df = edited[['Kategorie', 'is_fixed', 'is_cashless', 'Rest_Betrag', '50er', '20er', '10er', '5er', 'Notiz']]
+
+        total = edited["Summe"].sum()
+        sum_50 = edited['50er'].sum(); sum_20 = edited['20er'].sum()
+        sum_10 = edited['10er'].sum(); sum_5 = edited['5er'].sum()
+        cash_total = (sum_50*50) + (sum_20*20) + (sum_10*10) + (sum_5*5)
+        digital_total = edited['Rest_Betrag'].sum()
         
+        st.divider()
         st.markdown(f"**Gesamt: {format_euro(total)}**")
-        st.caption(f"Bar abheben: {format_euro(cash_sum)}")
+        c1, c2 = st.columns(2)
+        c1.info(f"Digital: {format_euro(digital_total)}")
+        c2.success(f"Bar: {format_euro(cash_total)}")
         
-        if st.button("Budgets buchen", type="primary", use_container_width=True):
+        if st.button("Buchen", type="primary", use_container_width=True):
             if total > 0:
                 c = 0
                 for _, row in edited.iterrows():
-                    if row["Betrag"] > 0:
+                    row_sum = (row['50er']*50) + (row['20er']*20) + (row['10er']*10) + (row['5er']*5) + row['Rest_Betrag']
+                    if row_sum > 0:
+                        desc = "Verteiler" + (f": {row['Notiz']}" if row['Notiz'] else "")
                         execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
-                                   (bulk_date, row["Kategorie"], "Verteiler", row["Betrag"], "SOLL", bulk_month, 0))
+                                   (bulk_date, row["Kategorie"], desc, row_sum, "SOLL", bulk_month, 0))
                         c += 1
+                if cash_total > 0:
+                    execute_db("INSERT INTO denominations (date, total_amount, c200, c100, c50, c20, c10, c5) VALUES (?,?,?,0,0,?,?,?,?)",
+                               (bulk_date.strftime("%Y-%m-%d"), cash_total, 0, int(sum_50), int(sum_20), int(sum_10), int(sum_5)))
                 st.success(f"✅ {c} Budgets gebucht!")
-                st.session_state.bulk_df = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].rename(columns={'name':'Kategorie', 'default_budget':'Betrag'})
+                # Reset
+                temp = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].copy()
+                temp.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Rest_Betrag']
+                temp['50er']=0; temp['20er']=0; temp['10er']=0; temp['5er']=0; temp['Notiz']=""
+                st.session_state.bulk_df = temp
                 st.rerun()
             else: st.warning("Summe ist 0.")
 
@@ -233,8 +266,8 @@ with st.sidebar:
         st.subheader("Umbuchung")
         with st.form("trf"):
             t_date = st.date_input("Datum", date.today())
-            c_from = st.selectbox("Von (Quelle)", current_categories)
-            c_to = st.selectbox("Nach (Ziel)", current_categories, index=1 if len(current_categories)>1 else 0)
+            c_from = st.selectbox("Von", current_categories)
+            c_to = st.selectbox("Nach", current_categories, index=1 if len(current_categories)>1 else 0)
             t_amt = st.number_input("Betrag", min_value=0.01, format="%.2f")
             if st.form_submit_button("Buchen", use_container_width=True):
                 if c_from != c_to:
@@ -249,7 +282,6 @@ with st.sidebar:
     elif sb_mode == "🏦 Back to Bank":
         st.subheader("Back to Bank")
         conn = get_db_connection()
-        # Nur Bargeld-Kategorien (Variable) zählen, die online ausgegeben wurden
         q = """SELECT SUM(t.amount) FROM transactions t LEFT JOIN categories c ON t.category = c.name 
                WHERE t.type='IST' AND t.is_online=1 AND (c.is_fixed=0 OR c.is_fixed IS NULL) AND (c.is_cashless=0 OR c.is_cashless IS NULL)"""
         online = pd.read_sql_query(q, conn).iloc[0,0] or 0.0
@@ -258,12 +290,10 @@ with st.sidebar:
         bal = online - dep
         st.metric("Im Umschlag", format_euro(bal))
         if bal > 0:
-            with st.form("bf"):
-                d_amt = st.number_input("Betrag einzahlen", value=float(bal), max_value=float(bal), format="%.2f")
-                if st.form_submit_button("Einzahlen", use_container_width=True):
-                    execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?,?,?,?,?,?)", (date.today(), "Back to Bank", "Einzahlung", d_amt, "BANK_DEPOSIT", date.today().strftime("%Y-%m")))
-                    st.success("✅")
-                    st.rerun()
+            if st.button("Geld eingezahlt (Reset)", type="primary", use_container_width=True):
+                execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?,?,?,?,?,?)", (date.today(), "Back to Bank", "Einzahlung", bal, "BANK_DEPOSIT", date.today().strftime("%Y-%m")))
+                st.toast("Eingezahlt!")
+                st.rerun()
         else: st.success("Leer.")
         
     # 5. TOOLS
@@ -283,23 +313,21 @@ with st.sidebar:
     # --- SETTINGS ---
     st.markdown("---")
     with st.expander("⚙️ Verwaltung & Backup"):
-        
         st.caption("Neue Kategorie")
         with st.form("add_cat_form", clear_on_submit=True):
             c_n, c_p = st.columns([2,1])
             new_name = c_n.text_input("Name", placeholder="Neue Kat.")
             new_prio = c_p.selectbox("Prio", PRIO_OPTIONS)
             c_fix, c_cashless = st.columns(2)
-            new_fix = c_fix.checkbox("Ist Fixkosten?")
+            new_fix = c_fix.checkbox("Fixkosten?")
             new_cashless = c_cashless.checkbox("Bargeldlos?")
-            
             if st.form_submit_button("Hinzufügen"):
                 if new_name:
                     if add_category_to_db(new_name, new_prio, 1 if new_fix else 0, 1 if new_cashless else 0):
                         st.success(f"OK")
                         if "bulk_df" in st.session_state: del st.session_state.bulk_df
                         st.rerun()
-                    else: st.error("Existiert bereits.")
+                    else: st.error("Existiert.")
         
         st.divider()
         st.caption("Bearbeiten")
@@ -310,7 +338,6 @@ with st.sidebar:
                 try: p_idx = PRIO_OPTIONS.index(row['priority'])
                 except: p_idx = 3
                 ep = st.selectbox("Prio", PRIO_OPTIONS, index=p_idx)
-                
                 c_e_fix, c_e_cl = st.columns(2)
                 ef = c_e_fix.checkbox("Fixkosten?", value=(row['is_fixed']==1))
                 ecl = c_e_cl.checkbox("Bargeldlos?", value=(row['is_cashless']==1))
@@ -319,7 +346,6 @@ with st.sidebar:
                 c_save, c_del = st.columns(2)
                 saved = c_save.form_submit_button("Speichern")
                 deleted = c_del.form_submit_button("Löschen", type="primary")
-                
                 if saved:
                     execute_db("UPDATE categories SET priority=?, is_fixed=?, is_cashless=?, default_budget=? WHERE name=?", (ep, 1 if ef else 0, 1 if ecl else 0, ed, edit_cat))
                     if "bulk_df" in st.session_state: del st.session_state.bulk_df
@@ -341,7 +367,7 @@ with st.sidebar:
                 execute_db("DELETE FROM transactions"); execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
                 st.rerun()
             if st.button("💥 Alles löschen", type="primary"):
-                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM subscriptions"); execute_db("DELETE FROM sqlite_sequence")
+                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM subscriptions"); execute_db("DELETE FROM sqlite_sequence"); execute_db("DELETE FROM denominations")
                 st.rerun()
 
 # --- MAIN TABS ---
@@ -504,3 +530,231 @@ else:
                 col_cfg = {
                     "name": st.column_config.TextColumn("Kategorie", disabled=True),
                     "Aktuell": st.column_config.NumberColumn("Ist-Stand", format="%.2f €", disabled=True),
+                    "target_amount": st.column_config.NumberColumn("Zielbetrag (€)", format="%.2f €", required=True),
+                    "due_date": st.column_config.DateColumn("Fällig am", format="DD.MM.YYYY"),
+                    "Progress": st.column_config.ProgressColumn("Fortschritt", format="%.0f%%"),
+                    "Rate": st.column_config.NumberColumn("Rate/Monat", format="%.2f €", disabled=True),
+                    "Info": st.column_config.TextColumn("Zeit", disabled=True),
+                    "notes": st.column_config.TextColumn("Notiz")
+                }
+                ed = st.data_editor(g, key=ek, use_container_width=True, hide_index=True, column_order=["name","Aktuell","target_amount","due_date","Progress","Rate","Info","notes"], column_config=col_cfg)
+                
+                if st.session_state[ek]["edited_rows"]:
+                    for i, ch in st.session_state[ek]["edited_rows"].items():
+                        cn = g.iloc[i]['name']
+                        nt = ch.get("target_amount", g.iloc[i]['target_amount'])
+                        nd = ch.get("due_date", g.iloc[i]['due_date'])
+                        nn = ch.get("notes", g.iloc[i]['notes'])
+                        if pd.isnull(nd): nd = None
+                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): nd = nd.strftime("%Y-%m-%d")
+                        execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
+                    st.rerun()
+
+    # 3. ANALYSE
+    with tab_ana:
+        st.subheader("Analyse")
+        if df.empty: st.info("Leer.")
+        else:
+            di = df[df['type']=='IST'].copy()
+            if di.empty: st.info("Keine Ausgaben.")
+            else:
+                c1, c2 = st.columns(2)
+                with c1: st.plotly_chart(px.pie(di, values='amount', names='category', title='Kategorien'), use_container_width=True)
+                with c2: st.plotly_chart(px.bar(di.groupby(['budget_month','category'])['amount'].sum().reset_index(), x='budget_month', y='amount', color='category', title='Trend'), use_container_width=True)
+
+    # 4. ABOS
+    with tab_subs:
+        st.subheader("🔄 Abos & Verträge")
+        subs_df = get_data("SELECT * FROM subscriptions")
+        if subs_df.empty: st.info("Keine Abos vorhanden. Füge welche über die Sidebar hinzu.")
+        else:
+            subs_df['start_date'] = pd.to_datetime(subs_df['start_date'])
+            def calc_monthly_cost(row):
+                amt = row['amount']
+                if row['cycle'] == "Jährlich": return amt / 12
+                if row['cycle'] == "Vierteljährlich": return amt / 3
+                if row['cycle'] == "Halbjährlich": return amt / 6
+                return amt
+            subs_df['Monatlich'] = subs_df.apply(calc_monthly_cost, axis=1)
+            c1, c2 = st.columns(2)
+            c1.metric("Monatliche Belastung (Ø)", format_euro(subs_df['Monatlich'].sum()))
+            c2.metric("Jährliche Gesamtkosten", format_euro(subs_df['Monatlich'].sum() * 12))
+            
+            sub_cfg = {
+                "id": st.column_config.NumberColumn(disabled=True), 
+                "name": st.column_config.TextColumn("Anbieter"), 
+                "amount": st.column_config.NumberColumn("Kosten (€)", format="%.2f €"), 
+                "cycle": st.column_config.SelectboxColumn("Turnus", options=CYCLE_OPTIONS), 
+                "category": st.column_config.SelectboxColumn("Kategorie", options=[""]+current_categories), 
+                "start_date": st.column_config.DateColumn("Startdatum"), 
+                "notice_period": st.column_config.TextColumn("Kündigungsfrist"), 
+                "Monatlich": st.column_config.NumberColumn("Ø Monat", format="%.2f €", disabled=True)
+            }
+            edited_subs = st.data_editor(subs_df, key="sub_editor", hide_index=True, use_container_width=True, column_config=sub_cfg, column_order=["name", "amount", "cycle", "Monatlich", "category", "start_date", "notice_period"], num_rows="dynamic")
+            
+            if st.session_state["sub_editor"]:
+                chg = st.session_state["sub_editor"]
+                for i in chg["deleted_rows"]: execute_db("DELETE FROM subscriptions WHERE id=?", (int(subs_df.iloc[i]['id']),))
+                for i, v in chg["edited_rows"].items():
+                    sid = subs_df.iloc[i]['id']
+                    for k, val in v.items():
+                        # FIX DATE
+                        if k == 'start_date':
+                            if pd.isnull(val): val = None
+                            elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
+                        execute_db(f"UPDATE subscriptions SET {k}=? WHERE id=?", (val, int(sid)))
+                if chg["added_rows"]:
+                    for row in chg["added_rows"]:
+                        execute_db("INSERT INTO subscriptions (name, amount, cycle, category, start_date, notice_period) VALUES (?,?,?,?,?,?)", (row.get("name","Neu"), row.get("amount",0), row.get("cycle","Monatlich"), row.get("category","Fixkosten"), row.get("start_date",date.today()), row.get("notice_period","")))
+                if chg["deleted_rows"] or chg["edited_rows"] or chg["added_rows"]: st.rerun()
+
+    # 5. KREDITE
+    with tab_loans:
+        st.subheader("📉 Kredit Übersicht")
+        loans_df = get_data("SELECT * FROM loans")
+        if loans_df.empty:
+            st.info("Keine Kredite angelegt. Nutze die Sidebar.")
+        else:
+            loans_df['start_date'] = pd.to_datetime(loans_df['start_date'])
+            def calc_loan(row):
+                total_liability = row['total_amount'] + row.get('interest_amount', 0.0)
+                today = date.today()
+                start = row['start_date'].date()
+                if today < start: months_passed = 0
+                else: months_passed = (today.year - start.year) * 12 + (today.month - start.month) + 1 
+                
+                if months_passed > row['term_months']: months_passed = row['term_months']
+                
+                paid_so_far = months_passed * row['monthly_payment']
+                if paid_so_far > total_liability: paid_so_far = total_liability
+                remaining = total_liability - paid_so_far
+                progress = paid_so_far / total_liability if total_liability > 0 else 0
+                end_date = row['start_date'] + relativedelta(months=row['term_months'])
+                status = "✅ Bezahlt" if remaining <= 0 else f"{int(row['term_months'] - months_passed)} Raten"
+                return status, progress, remaining, end_date, total_liability
+
+            res = loans_df.apply(calc_loan, axis=1, result_type='expand')
+            loans_df['Status'] = res[0]; loans_df['Progress'] = res[1]; loans_df['Rest'] = res[2]; loans_df['Ende'] = res[3]; loans_df['Gesamt'] = res[4]
+            
+            c1, c2 = st.columns(2)
+            c1.metric("Monatliche Belastung", format_euro(loans_df[loans_df['Rest'] > 0]['monthly_payment'].sum()))
+            c2.metric("Gesamtschulden (Rest)", format_euro(loans_df['Rest'].sum()))
+            
+            loan_cfg = {
+                "id": st.column_config.NumberColumn(disabled=True), 
+                "name": st.column_config.TextColumn("Kredit"), 
+                "start_date": st.column_config.DateColumn("Startdatum"), 
+                "total_amount": st.column_config.NumberColumn("Nettokredit", format="%.2f €"), 
+                "interest_amount": st.column_config.NumberColumn("Zinsen gesamt (€)", format="%.2f €"), 
+                "Gesamt": st.column_config.NumberColumn("Bruttoschuld", format="%.2f €", disabled=True), 
+                "term_months": st.column_config.NumberColumn("Laufzeit (Monate)"), 
+                "monthly_payment": st.column_config.NumberColumn("Rate", format="%.2f €"), 
+                "Progress": st.column_config.ProgressColumn("Status", format="%.0f%%"), 
+                "Rest": st.column_config.NumberColumn("Restschuld", format="%.2f €", disabled=True), 
+                "Ende": st.column_config.DateColumn(format="DD.MM.YYYY", disabled=True), 
+                "Status": st.column_config.TextColumn(disabled=True)
+            }
+            
+            edited_loans = st.data_editor(
+                loans_df, 
+                key="loan_editor",
+                hide_index=True,
+                use_container_width=True,
+                column_config=loan_cfg,
+                column_order=["name", "monthly_payment", "Rest", "Progress", "Gesamt", "interest_amount", "start_date", "term_months", "Ende"],
+                num_rows="dynamic"
+            )
+            
+            if st.session_state["loan_editor"]:
+                chg = st.session_state["loan_editor"]
+                for i in chg["deleted_rows"]: 
+                    execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
+                for i, v in chg["edited_rows"].items():
+                    lid = loans_df.iloc[i]['id']
+                    for k, val in v.items():
+                        # FIX DATE
+                        if k == 'start_date':
+                            if pd.isnull(val): val = None
+                            elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
+                        execute_db(f"UPDATE loans SET {k}=? WHERE id=?", (val, int(lid)))
+                if chg["added_rows"]:
+                    for row in chg["added_rows"]:
+                        execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)", (row.get("name","Neu"), row.get("start_date",date.today()), row.get("total_amount",0), row.get("interest_amount",0), row.get("term_months",12), row.get("monthly_payment",0)))
+                if chg["deleted_rows"] or chg["edited_rows"] or chg["added_rows"]: st.rerun()
+
+    # T6 Compare
+    with tab_comp:
+        st.subheader("Vergleich")
+        if df.empty: st.info("Leer.")
+        else:
+            ps = sorted(df['Analyse_Monat'].unique(), reverse=True)
+            if len(ps)>1:
+                c1,c2 = st.columns(2)
+                p1 = c1.selectbox("Basis", ps, index=0)
+                p2 = c2.selectbox("Vgl", ps, index=1)
+                def gs(p):
+                    k = m_opts[m_opts['Analyse_Monat']==p]['sort_key_month'].iloc[0]
+                    return df[(df['sort_key_month']==k)&(df['type']=='IST')].groupby('category')['amount'].sum()
+                cp = pd.DataFrame({'Basis': gs(p1), 'Vgl': gs(p2)}).fillna(0)
+                cp['Diff'] = cp['Basis'] - cp['Vgl']
+                st.dataframe(cp.style.format("{:.2f} €").background_gradient(cmap="RdYlGn_r", subset=['Diff']), use_container_width=True)
+            else: st.info("Zu wenig Daten.")
+
+    # T7 Data
+    with tab_data:
+        st.subheader("Editor")
+        de = get_data("SELECT * FROM transactions ORDER BY date DESC, id DESC")
+        if not de.empty: de['date'] = pd.to_datetime(de['date'])
+        cf = {
+            "id": st.column_config.NumberColumn(disabled=True), 
+            "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"), 
+            "category": st.column_config.SelectboxColumn("Kategorie", options=current_categories + ["Back to Bank"]), 
+            "type": st.column_config.SelectboxColumn("Typ", options=["IST", "SOLL", "BANK_DEPOSIT"]), 
+            "amount": st.column_config.NumberColumn("Betrag", format="%.2f €"), 
+            "is_online": st.column_config.CheckboxColumn("Online?"),
+            "budget_month": st.column_config.TextColumn("Budget-Monat"),
+            "description": st.column_config.TextColumn("Beschreibung")
+        }
+        er = st.data_editor(de, hide_index=True, use_container_width=True, column_config=cf, key="me", num_rows="dynamic")
+        
+        if st.session_state["me"]:
+            ch = st.session_state["me"]
+            for i in ch["deleted_rows"]: execute_db("DELETE FROM transactions WHERE id=?", (int(de.iloc[i]['id']),))
+            for i, v in ch["edited_rows"].items():
+                rid = de.iloc[i]['id']
+                for k, val in v.items():
+                    # FIX DATE
+                    if k == 'date':
+                        if pd.isnull(val): val = None
+                        elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
+                    if k=='is_online': val=1 if val else 0
+                    execute_db(f"UPDATE transactions SET {k}=? WHERE id=?", (val, int(rid)))
+            for r in ch["added_rows"]:
+                execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
+                           (r.get('date', date.today()), r.get('category', 'Sonstiges'), r.get('description', ''), r.get('amount', 0), r.get('type', 'IST'), r.get('budget_month', date.today().strftime('%Y-%m')), 1 if r.get('is_online') else 0))
+            if ch["deleted_rows"] or ch["edited_rows"] or ch["added_rows"]: st.rerun()
+
+    # T8 Anleitung
+    with tab_help:
+        st.subheader("📖 Anleitung & Workflow")
+        
+        with st.expander("1️⃣ Einrichtung & Kategorien", expanded=True):
+            st.markdown("""
+            1. **⚙️ Verwaltung**: Erstelle deine Kategorien.
+            2. **Fixkosten**: Haken bei "Ist Fixkosten", wenn es vom Konto abgeht (Miete).
+            3. **Bargeldlos**: Haken bei "Variabel aber bargeldlos", wenn es ein variables Budget ist, das du aber meistens online zahlst (z.B. Drogerie Online). Das System sagt dir dann beim Verteilen, dass du dafür kein Bargeld abheben musst.
+            """)
+            
+        with st.expander("2️⃣ Monatsanfang (Geld verteilen)"):
+            st.markdown("""
+            1. **💰 Verteiler**: Wähle den Monat.
+            2. Trage in die Spalten (50er, 20er...) ein, wie viele Scheine du für den Umschlag brauchst.
+            3. Bei Fixkosten oder Online-Budgets trage den Betrag einfach bei "Rest/Digital" ein.
+            4. "Budgets buchen" erstellt die SOLL-Einträge und speichert deine Schein-Liste.
+            """)
+            
+        with st.expander("3️⃣ Hybrid-System & Ausgaben"):
+            st.markdown("""
+            1. **Ausgaben erfassen**: Wenn du einen Umschlag (z.B. Freizeit) online benutzt (z.B. Kinokarten online), setze den Haken **💳 Online**.
+            2. **🏦 Bank (Back to Bank)**: Das System merkt, dass du Bargeld im Umschlag hast, das eigentlich weg ist. Es sagt dir: "Nimm X Euro aus dem Umschlag und zahl es ein".
+            """)
