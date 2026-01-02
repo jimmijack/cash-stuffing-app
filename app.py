@@ -370,6 +370,7 @@ with st.sidebar:
             st.download_button("📥 Backup", csv, "budget_backup.csv", "text/csv")
         
         st.divider()
+        st.error("Gefahrenzone")
         if st.checkbox("Reset freischalten"):
             if st.button("🧹 Nur Buchungen löschen", type="primary"):
                 execute_db("DELETE FROM transactions"); execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
@@ -396,9 +397,10 @@ else:
         loan_monthly = 0.0
         if not l_df.empty:
             l_df['start_date'] = pd.to_datetime(l_df['start_date'])
-            today = datetime.datetime.now()
+            today = date.today()
             def is_active(row):
-                end_date = row['start_date'] + relativedelta(months=row['term_months'])
+                # FIX: use .date() to compare with date.today()
+                end_date = (row['start_date'] + relativedelta(months=row['term_months'])).date()
                 return today <= end_date
             active_loans = l_df[l_df.apply(is_active, axis=1)]
             loan_monthly = active_loans['monthly_payment'].sum()
@@ -485,7 +487,7 @@ else:
                     ts['M'] = ts['is_online'].apply(lambda x: "💳" if x==1 else "💵")
                     st.dataframe(ts[['date','category','description','amount','type','M']].sort_values(by='date', ascending=False), use_container_width=True, column_config={"amount": st.column_config.NumberColumn(format="%.2f €"), "date": st.column_config.DateColumn(format="DD.MM.YYYY")}, hide_index=True)
 
-    # 2. SINKING
+    # T2 Sinking
     with tab_sf:
         st.subheader("🎯 Sparziele")
         sfc = pd.Series(dtype=float)
@@ -516,7 +518,7 @@ else:
         sfd['Info'] = re[1]
         sfd['Progress'] = (sfd['Aktuell']/sfd['target_amount']).fillna(0).clip(0,1)
         
-        # Rate
+        # Live Rate
         total_monthly_need = sfd[sfd['target_amount'] > 0]['Rate'].sum()
         prio_sums = sfd[sfd['target_amount'] > 0].groupby('priority')['Rate'].sum()
         sum_a = prio_sums.get('A - Hoch', 0.0)
@@ -553,8 +555,14 @@ else:
                         nt = ch.get("target_amount", g.iloc[i]['target_amount'])
                         nd = ch.get("due_date", g.iloc[i]['due_date'])
                         nn = ch.get("notes", g.iloc[i]['notes'])
-                        if pd.isnull(nd): nd = None
-                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): nd = nd.strftime("%Y-%m-%d")
+                        
+                        # --- FIX DATE SAVE ---
+                        if pd.isnull(nd): 
+                            nd = None
+                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): 
+                            nd = nd.strftime("%Y-%m-%d")
+                        # ---------------------
+                        
                         execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
                     st.rerun()
 
@@ -641,7 +649,7 @@ else:
                 remaining = total_liability - paid_so_far
                 progress = paid_so_far / total_liability if total_liability > 0 else 0
                 end_date = row['start_date'] + relativedelta(months=row['term_months'])
-                status = "✅ Bezahlt" if remaining <= 0 else f"{int(row['term_months'] - months_passed)} Raten"
+                status = "✅ Bezahlt" if remaining <= 0 else f"{int(row['term_months'] - months_passed)} Raten offen"
                 return status, progress, remaining, end_date, total_liability
 
             res = loans_df.apply(calc_loan, axis=1, result_type='expand')
@@ -717,8 +725,8 @@ else:
         loan_monthly_sum = 0.0
         if not l_df.empty:
             l_df['start_date'] = pd.to_datetime(l_df['start_date'])
-            # Aktuelle Kredite
-            act_l = l_df[l_df.apply(lambda r: today <= (r['start_date'] + relativedelta(months=r['term_months'])), axis=1)]
+            # Aktuelle Kredite - FIX: .date() conversion
+            act_l = l_df[l_df.apply(lambda r: today <= (r['start_date'] + relativedelta(months=r['term_months'])).date(), axis=1)]
             loan_monthly_sum = act_l['monthly_payment'].sum()
             
         total_fixed = sub_monthly_sum + loan_monthly_sum
@@ -731,7 +739,7 @@ else:
         
         with col_sim:
             st.markdown("#### Langzeit-Simulation")
-            st.caption("Wie schnell kommst du ins Plus, wenn du so weitermachst?")
+            st.caption("Wie schnell kommst du ins Plus?")
             
             # User kann Rate anpassen
             repay_rate = st.number_input("Monatlicher Abtrag / Sparrate", value=float(max(0, calc_surplus)), step=10.0, format="%.2f", help="Standard = Einnahmen - (Fixkosten + Budgets)")
@@ -739,7 +747,7 @@ else:
             if start_saldo >= 0:
                 st.success("✅ Du bist bereits im Plus!")
             elif repay_rate <= 0:
-                st.error("⚠️ Dein monatlicher Überschuss ist ≤ 0. Du kommst so nie ins Plus.")
+                st.error("⚠️ Dein monatlicher Überschuss ist ≤ 0.")
             else:
                 months_needed = abs(start_saldo) / repay_rate
                 date_free = today + relativedelta(months=int(months_needed))
