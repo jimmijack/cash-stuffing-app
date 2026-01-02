@@ -2,10 +2,12 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import datetime
+import calendar
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
 import plotly.express as px
+import numpy as np
 
 # --- 1. KONFIGURATION & CSS ---
 st.set_page_config(page_title="Cash Stuffing Planer", layout="wide", page_icon="💶")
@@ -13,10 +15,7 @@ st.set_page_config(page_title="Cash Stuffing Planer", layout="wide", page_icon="
 # Custom CSS
 st.markdown("""
     <style>
-        /* Container Abstände */
-        .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
-        
-        /* Metrik-Boxen */
+        .block-container {padding-top: 3.5rem !important; padding-bottom: 3rem !important;}
         div[data-testid="stMetric"] {
             background-color: var(--secondary-background-color);
             border: 1px solid rgba(128, 128, 128, 0.2);
@@ -24,24 +23,17 @@ st.markdown("""
             border-radius: 8px;
             color: var(--text-color);
         }
-        
-        /* Tabellen Header verstecken (Index) */
+        div[data-baseweb="segmented-control"] button {min-height: 40px;}
         thead tr th:first-child {display:none}
         tbody th {display:none}
-        
-        /* Tab Styling */
-        div[data-baseweb="tab-list"] { gap: 5px; }
         button[data-baseweb="tab"] {
-            font-size: 16px !important; 
-            font-weight: 600 !important;
+            font-size: 16px !important; font-weight: 600 !important;
             border: 1px solid rgba(128, 128, 128, 0.2) !important;
-            border-radius: 5px 5px 0 0 !important;
-            padding: 8px 16px !important;
+            border-radius: 5px 5px 0 0 !important; padding: 8px 16px !important;
             background-color: var(--secondary-background-color);
         }
         button[data-baseweb="tab"][aria-selected="true"] {
-            border-bottom: 2px solid #ff4b4b !important;
-            background-color: var(--background-color);
+            border-bottom: 2px solid #ff4b4b !important; background-color: var(--background-color);
         }
     </style>
 """, unsafe_allow_html=True)
@@ -80,6 +72,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS loans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, start_date TEXT, total_amount REAL, interest_amount REAL DEFAULT 0.0, term_months INTEGER, monthly_payment REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, cycle TEXT, category TEXT, start_date TEXT, notice_period TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS denominations (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, total_amount REAL, c200 INTEGER DEFAULT 0, c100 INTEGER DEFAULT 0, c50 INTEGER DEFAULT 0, c20 INTEGER DEFAULT 0, c10 INTEGER DEFAULT 0, c5 INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS incomes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, day_of_month INTEGER)''')
 
     # Migrations
     try: c.execute("SELECT default_budget FROM categories LIMIT 1")
@@ -128,7 +121,6 @@ def get_categories_full():
     cols = ['is_fixed', 'is_cashless', 'default_budget']
     for col in cols:
         if col not in df.columns: df[col] = 0
-        
     df['is_fixed'] = df['is_fixed'].fillna(0).astype(int)
     df['is_cashless'] = df['is_cashless'].fillna(0).astype(int)
     return df
@@ -143,7 +135,6 @@ current_categories = cat_df['name'].tolist() if not cat_df.empty else []
 
 st.title("💶 Cash Stuffing Planer")
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.markdown("### 🧭 Menü")
     sb_mode = st.radio("Navigation", ["📝 Neuer Eintrag", "💰 Budget Verteiler", "💸 Umbuchung", "🏦 Back to Bank", "🧮 Scheinrechner"], label_visibility="collapsed")
@@ -203,7 +194,6 @@ with st.sidebar:
             st.session_state.bulk_df = temp
 
         st.caption("Verteilung:")
-        
         calc_df = st.session_state.bulk_df.copy()
         calc_df['Summe'] = (calc_df['50er']*50) + (calc_df['20er']*20) + (calc_df['10er']*10) + (calc_df['5er']*5) + calc_df['Rest_Betrag']
         
@@ -313,13 +303,14 @@ with st.sidebar:
     # --- SETTINGS ---
     st.markdown("---")
     with st.expander("⚙️ Verwaltung & Backup"):
+        
         st.caption("Neue Kategorie")
         with st.form("add_cat_form", clear_on_submit=True):
             c_n, c_p = st.columns([2,1])
             new_name = c_n.text_input("Name", placeholder="Neue Kat.")
             new_prio = c_p.selectbox("Prio", PRIO_OPTIONS)
             c_fix, c_cashless = st.columns(2)
-            new_fix = c_fix.checkbox("Fixkosten?")
+            new_fix = c_fix.checkbox("Ist Fixkosten?")
             new_cashless = c_cashless.checkbox("Bargeldlos?")
             if st.form_submit_button("Hinzufügen"):
                 if new_name:
@@ -357,6 +348,23 @@ with st.sidebar:
                     st.rerun()
         
         st.divider()
+        st.caption("Einnahmen (für Prognose)")
+        inc_df = get_data("SELECT * FROM incomes")
+        with st.form("add_income"):
+            c_in, c_ia, c_id = st.columns(3)
+            i_name = c_in.text_input("Name", "Gehalt")
+            i_amount = c_ia.number_input("Betrag", min_value=0.0, step=100.0)
+            i_day = c_id.number_input("Tag (1-31)", min_value=1, max_value=31, value=1)
+            if st.form_submit_button("Einnahme speichern"):
+                execute_db("INSERT INTO incomes (name, amount, day_of_month) VALUES (?,?,?)", (i_name, i_amount, i_day))
+                st.rerun()
+        if not inc_df.empty:
+            st.dataframe(inc_df, hide_index=True)
+            if st.button("Alle Einnahmen löschen"):
+                execute_db("DELETE FROM incomes")
+                st.rerun()
+        
+        st.divider()
         if not df.empty:
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Backup", csv, "budget_backup.csv", "text/csv")
@@ -367,17 +375,17 @@ with st.sidebar:
                 execute_db("DELETE FROM transactions"); execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
                 st.rerun()
             if st.button("💥 Alles löschen", type="primary"):
-                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM subscriptions"); execute_db("DELETE FROM sqlite_sequence"); execute_db("DELETE FROM denominations")
+                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM subscriptions"); execute_db("DELETE FROM sqlite_sequence"); execute_db("DELETE FROM denominations"); execute_db("DELETE FROM incomes")
                 st.rerun()
 
 # --- MAIN TABS ---
 if df.empty and not current_categories:
-    # 8 Tabs
-    t_dash, t_sf, t_ana, t_sub, t_loan, t_comp, t_dat, t_hlp = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
+    # 9 Tabs
+    t_dash, t_sf, t_ana, t_sub, t_loan, t_fore, t_comp, t_dat, t_hlp = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "🔮 Prognose", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
     st.info("Start: Lege in der Sidebar Kategorien an.")
 else:
-    # 8 Tabs: Dashboard, Sparziele, Analyse, Abos, Kredite, Vergleich, Daten, Anleitung
-    tab_dash, tab_sf, tab_ana, tab_subs, tab_loans, tab_comp, tab_data, tab_help = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "📖 Hilfe"])
+    # 9 Tabs
+    tab_dash, tab_sf, tab_ana, tab_subs, tab_loans, tab_forecast, tab_comp, tab_data, tab_help = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "🔮 Prognose", "⚖️ Vergleich", "📝 Daten", "📖 Hilfe"])
 
     # 1. DASHBOARD
     with tab_dash:
@@ -612,10 +620,12 @@ else:
     with tab_loans:
         st.subheader("📉 Kredit Übersicht")
         loans_df = get_data("SELECT * FROM loans")
+        
         if loans_df.empty:
             st.info("Keine Kredite angelegt. Nutze die Sidebar.")
         else:
             loans_df['start_date'] = pd.to_datetime(loans_df['start_date'])
+            
             def calc_loan(row):
                 total_liability = row['total_amount'] + row.get('interest_amount', 0.0)
                 today = date.today()
@@ -627,6 +637,7 @@ else:
                 
                 paid_so_far = months_passed * row['monthly_payment']
                 if paid_so_far > total_liability: paid_so_far = total_liability
+                
                 remaining = total_liability - paid_so_far
                 progress = paid_so_far / total_liability if total_liability > 0 else 0
                 end_date = row['start_date'] + relativedelta(months=row['term_months'])
@@ -682,6 +693,117 @@ else:
                         execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)", (row.get("name","Neu"), row.get("start_date",date.today()), row.get("total_amount",0), row.get("interest_amount",0), row.get("term_months",12), row.get("monthly_payment",0)))
                 if chg["deleted_rows"] or chg["edited_rows"] or chg["added_rows"]: st.rerun()
 
+    # 6. PROGNOSE (NEU ERWEITERT)
+    with tab_forecast:
+        st.subheader("🔮 Prognose & Schuldenfrei-Planer")
+        
+        # Eingabe Startsaldo und Simulation
+        col_inp, col_sim = st.columns([1,1])
+        with col_inp:
+            if "forecast_start" not in st.session_state: st.session_state.forecast_start = 1000.0
+            start_saldo = st.number_input("Aktueller Kontostand", value=st.session_state.forecast_start, step=50.0, format="%.2f")
+            st.session_state.forecast_start = start_saldo
+
+        # Daten sammeln
+        today = date.today()
+        # Einnahmen
+        inc_df = get_data("SELECT * FROM incomes")
+        total_income = inc_df['amount'].sum() if not inc_df.empty else 0.0
+        
+        # Fixkosten (Abos + Kredite)
+        sub_monthly_sum = 0.0
+        if not s_df.empty: sub_monthly_sum = s_df.apply(get_m_cost, axis=1).sum()
+        
+        loan_monthly_sum = 0.0
+        if not l_df.empty:
+            l_df['start_date'] = pd.to_datetime(l_df['start_date'])
+            # Aktuelle Kredite
+            act_l = l_df[l_df.apply(lambda r: today <= (r['start_date'] + relativedelta(months=r['term_months'])), axis=1)]
+            loan_monthly_sum = act_l['monthly_payment'].sum()
+            
+        total_fixed = sub_monthly_sum + loan_monthly_sum
+        
+        # Variable Budgets (Standard)
+        var_budget_sum = cat_df[cat_df['is_fixed'] == 0]['default_budget'].sum()
+        
+        # Berechneter Überschuss
+        calc_surplus = total_income - total_fixed - var_budget_sum
+        
+        with col_sim:
+            st.markdown("#### Langzeit-Simulation")
+            st.caption("Wie schnell kommst du ins Plus, wenn du so weitermachst?")
+            
+            # User kann Rate anpassen
+            repay_rate = st.number_input("Monatlicher Abtrag / Sparrate", value=float(max(0, calc_surplus)), step=10.0, format="%.2f", help="Standard = Einnahmen - (Fixkosten + Budgets)")
+            
+            if start_saldo >= 0:
+                st.success("✅ Du bist bereits im Plus!")
+            elif repay_rate <= 0:
+                st.error("⚠️ Dein monatlicher Überschuss ist ≤ 0. Du kommst so nie ins Plus.")
+            else:
+                months_needed = abs(start_saldo) / repay_rate
+                date_free = today + relativedelta(months=int(months_needed))
+                st.success(f"🎉 Schuldenfrei in **{months_needed:.1f} Monaten** ({date_free.strftime('%B %Y')})")
+                
+                # Chart Projection
+                dates = [today + relativedelta(months=i) for i in range(int(months_needed)+2)]
+                values = [start_saldo + (repay_rate * i) for i in range(len(dates))]
+                fig_proj = px.line(x=dates, y=values, title="Weg zur Null")
+                fig_proj.add_hline(y=0, line_dash="dash", line_color="green")
+                st.plotly_chart(fig_proj, use_container_width=True)
+
+        st.divider()
+        st.markdown("#### Liquidität diesen Monat")
+        # Kalender Events Logik für den laufenden Monat
+        _, last_day = calendar.monthrange(today.year, today.month)
+        events = []
+        
+        # A. Einnahmen
+        if not inc_df.empty:
+            for _, r in inc_df.iterrows():
+                try:
+                    evt_date = date(today.year, today.month, int(r['day_of_month']))
+                    if evt_date >= today: events.append({"Datum": evt_date, "Text": f"💰 {r['name']}", "Betrag": r['amount']})
+                except: pass
+        
+        # B. Abos (Vereinfacht: Zeige alle Monatlichen an ihrem Tag)
+        if not s_df.empty:
+            for _, r in s_df.iterrows():
+                try: # Nur Monatliche oder passende Jährliche
+                    if r['cycle'] == 'Monatlich' or (r['cycle'] == 'Jährlich' and r['start_date'].month == today.month):
+                         d_day = r['start_date'].day
+                         evt_date = date(today.year, today.month, d_day)
+                         if evt_date >= today: events.append({"Datum": evt_date, "Text": f"🔄 {r['name']}", "Betrag": -r['amount']})
+                except: pass
+
+        # C. Kredite
+        if not l_df.empty:
+             for _, r in active_loans.iterrows():
+                 try:
+                     d_day = r['start_date'].day
+                     evt_date = date(today.year, today.month, d_day)
+                     if evt_date >= today: events.append({"Datum": evt_date, "Text": f"📉 {r['name']}", "Betrag": -r['monthly_payment']})
+                 except: pass
+
+        events.sort(key=lambda x: x['Datum'])
+        
+        if events:
+            run_bal = start_saldo
+            chart_d = [{"Datum": today, "Saldo": start_saldo, "Info": "Start"}]
+            table_d = []
+            for e in events:
+                run_bal += e['Betrag']
+                chart_d.append({"Datum": e['Datum'], "Saldo": run_bal, "Info": e['Text']})
+                table_d.append(e)
+            
+            f_df = pd.DataFrame(chart_d)
+            fig = px.line(f_df, x="Datum", y="Saldo", markers=True)
+            fig.add_hrect(y0=-100000, y1=0, line_width=0, fillcolor="red", opacity=0.1)
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(pd.DataFrame(table_d), use_container_width=True)
+        else:
+            st.info("Keine weiteren fixen Buchungen diesen Monat erwartet.")
+
     # T6 Compare
     with tab_comp:
         st.subheader("Vergleich")
@@ -700,7 +822,7 @@ else:
                 st.dataframe(cp.style.format("{:.2f} €").background_gradient(cmap="RdYlGn_r", subset=['Diff']), use_container_width=True)
             else: st.info("Zu wenig Daten.")
 
-    # T7 Data
+    # T7 Editor
     with tab_data:
         st.subheader("Editor")
         de = get_data("SELECT * FROM transactions ORDER BY date DESC, id DESC")
@@ -743,18 +865,23 @@ else:
             1. **⚙️ Verwaltung**: Erstelle deine Kategorien.
             2. **Fixkosten**: Haken bei "Ist Fixkosten", wenn es vom Konto abgeht (Miete).
             3. **Bargeldlos**: Haken bei "Variabel aber bargeldlos", wenn es ein variables Budget ist, das du aber meistens online zahlst (z.B. Drogerie Online). Das System sagt dir dann beim Verteilen, dass du dafür kein Bargeld abheben musst.
+            4. **Einnahmen**: Trage dein Gehalt und das Datum in der Verwaltung ein für die Prognose.
             """)
             
         with st.expander("2️⃣ Monatsanfang (Geld verteilen)"):
             st.markdown("""
             1. **💰 Verteiler**: Wähle den Monat.
-            2. Trage in die Spalten (50er, 20er...) ein, wie viele Scheine du für den Umschlag brauchst.
-            3. Bei Fixkosten oder Online-Budgets trage den Betrag einfach bei "Rest/Digital" ein.
-            4. "Budgets buchen" erstellt die SOLL-Einträge und speichert deine Schein-Liste.
+            2. "Budgets buchen" erstellt die SOLL-Einträge.
+            3. **Bar abheben**: Zeigt dir exakt, wie viel Bargeld du für deine Umschläge brauchst (exklusive Fixkosten und bargeldlose Budgets).
             """)
             
         with st.expander("3️⃣ Hybrid-System & Ausgaben"):
             st.markdown("""
             1. **Ausgaben erfassen**: Wenn du einen Umschlag (z.B. Freizeit) online benutzt (z.B. Kinokarten online), setze den Haken **💳 Online**.
             2. **🏦 Bank (Back to Bank)**: Das System merkt, dass du Bargeld im Umschlag hast, das eigentlich weg ist. Es sagt dir: "Nimm X Euro aus dem Umschlag und zahl es ein".
+            """)
+
+        with st.expander("4️⃣ Prognose & Finanzguru-Feature"):
+            st.markdown("""
+            Der Reiter **🔮 Prognose** zeigt dir, wie viel Geld am Monatsende noch auf dem Konto ist, basierend auf deinen eingetragenen Fixkosten (Abos, Kredite) und Einnahmen.
             """)
