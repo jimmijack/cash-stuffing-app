@@ -42,6 +42,7 @@ DB_FILE = "/data/budget.db"
 
 DE_MONTHS = {1: "Januar", 2: "Februar", 3: "März", 4: "April", 5: "Mai", 6: "Juni", 7: "Juli", 8: "August", 9: "September", 10: "Oktober", 11: "November", 12: "Dezember"}
 DEFAULT_CATEGORIES = ["Lebensmittel", "Miete", "Sparen", "Freizeit", "Transport", "Sonstiges", "Fixkosten", "Kleidung", "Geschenke", "Notgroschen"]
+FIXED_COST_GROUPS = ["Wohnkosten", "Versicherungen", "Abos/Software", "Telefon/Handy", "Mobilität", "Unterhalt", "Kredite", "Sonstiges"] # Angepasst an deinen Screenshot
 PRIO_OPTIONS = ["A - Hoch", "B - Mittel", "C - Niedrig", "Standard"]
 CYCLE_OPTIONS = ["Monatlich", "Vierteljährlich", "Halbjährlich", "Jährlich"]
 
@@ -70,6 +71,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, category TEXT, description TEXT, amount REAL, type TEXT, budget_month TEXT, is_online INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, priority TEXT DEFAULT 'Standard', target_amount REAL DEFAULT 0.0, due_date TEXT, notes TEXT, is_fixed INTEGER DEFAULT 0, default_budget REAL DEFAULT 0.0, is_cashless INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS loans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, start_date TEXT, total_amount REAL, interest_amount REAL DEFAULT 0.0, term_months INTEGER, monthly_payment REAL)''')
+    # Subscriptions angepasst: category ist jetzt die "Gruppe" (Wohnkosten etc.)
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, cycle TEXT, category TEXT, start_date TEXT, notice_period TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS denominations (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, total_amount REAL, c200 INTEGER DEFAULT 0, c100 INTEGER DEFAULT 0, c50 INTEGER DEFAULT 0, c20 INTEGER DEFAULT 0, c10 INTEGER DEFAULT 0, c5 INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS incomes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, day_of_month INTEGER)''')
@@ -147,7 +149,6 @@ with st.sidebar:
             col_d, col_t = st.columns([1,1])
             date_input = col_d.date_input("Datum", date.today(), format="DD.MM.YYYY")
             type_input = col_t.selectbox("Typ", ["IST (Ausgabe)", "SOLL (Budget)"])
-            
             budget_target = None
             if "SOLL" in type_input:
                 today = date.today()
@@ -348,29 +349,11 @@ with st.sidebar:
                     st.rerun()
         
         st.divider()
-        st.caption("Einnahmen (für Prognose)")
-        inc_df = get_data("SELECT * FROM incomes")
-        with st.form("add_income"):
-            c_in, c_ia, c_id = st.columns(3)
-            i_name = c_in.text_input("Name", "Gehalt")
-            i_amount = c_ia.number_input("Betrag", min_value=0.0, step=100.0)
-            i_day = c_id.number_input("Tag (1-31)", min_value=1, max_value=31, value=1)
-            if st.form_submit_button("Einnahme speichern"):
-                execute_db("INSERT INTO incomes (name, amount, day_of_month) VALUES (?,?,?)", (i_name, i_amount, i_day))
-                st.rerun()
-        if not inc_df.empty:
-            st.dataframe(inc_df, hide_index=True)
-            if st.button("Alle Einnahmen löschen"):
-                execute_db("DELETE FROM incomes")
-                st.rerun()
-        
-        st.divider()
         if not df.empty:
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Backup", csv, "budget_backup.csv", "text/csv")
         
         st.divider()
-        st.error("Gefahrenzone")
         if st.checkbox("Reset freischalten"):
             if st.button("🧹 Nur Buchungen löschen", type="primary"):
                 execute_db("DELETE FROM transactions"); execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
@@ -381,12 +364,12 @@ with st.sidebar:
 
 # --- MAIN TABS ---
 if df.empty and not current_categories:
-    # 9 Tabs
-    t_dash, t_sf, t_ana, t_sub, t_loan, t_fore, t_comp, t_dat, t_hlp = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "🔮 Prognose", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
+    # 8 Tabs
+    t_dash, t_sf, t_ana, t_loan, t_fore, t_comp, t_dat, t_hlp = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "📉 Kredite", "🔮 Prognose", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
     st.info("Start: Lege in der Sidebar Kategorien an.")
 else:
-    # 9 Tabs
-    tab_dash, tab_sf, tab_ana, tab_subs, tab_loans, tab_forecast, tab_comp, tab_data, tab_help = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "🔮 Prognose", "⚖️ Vergleich", "📝 Daten", "📖 Hilfe"])
+    # 8 Tabs: Dashboard, Sparziele, Analyse, Kredite, Prognose, Vergleich, Daten, Anleitung
+    tab_dash, tab_sf, tab_ana, tab_loans, tab_forecast, tab_comp, tab_data, tab_help = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "📉 Kredite", "🔮 Prognose", "⚖️ Vergleich", "📝 Daten", "📖 Hilfe"])
 
     # 1. DASHBOARD
     with tab_dash:
@@ -397,10 +380,9 @@ else:
         loan_monthly = 0.0
         if not l_df.empty:
             l_df['start_date'] = pd.to_datetime(l_df['start_date'])
-            today = date.today()
+            today = datetime.datetime.now()
             def is_active(row):
-                # FIX: use .date() to compare with date.today()
-                end_date = (row['start_date'] + relativedelta(months=row['term_months'])).date()
+                end_date = row['start_date'] + relativedelta(months=row['term_months'])
                 return today <= end_date
             active_loans = l_df[l_df.apply(is_active, axis=1)]
             loan_monthly = active_loans['monthly_payment'].sum()
@@ -555,14 +537,8 @@ else:
                         nt = ch.get("target_amount", g.iloc[i]['target_amount'])
                         nd = ch.get("due_date", g.iloc[i]['due_date'])
                         nn = ch.get("notes", g.iloc[i]['notes'])
-                        
-                        # --- FIX DATE SAVE ---
-                        if pd.isnull(nd): 
-                            nd = None
-                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): 
-                            nd = nd.strftime("%Y-%m-%d")
-                        # ---------------------
-                        
+                        if pd.isnull(nd): nd = None
+                        elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): nd = nd.strftime("%Y-%m-%d")
                         execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
                     st.rerun()
 
@@ -578,62 +554,14 @@ else:
                 with c1: st.plotly_chart(px.pie(di, values='amount', names='category', title='Kategorien'), use_container_width=True)
                 with c2: st.plotly_chart(px.bar(di.groupby(['budget_month','category'])['amount'].sum().reset_index(), x='budget_month', y='amount', color='category', title='Trend'), use_container_width=True)
 
-    # 4. ABOS
-    with tab_subs:
-        st.subheader("🔄 Abos & Verträge")
-        subs_df = get_data("SELECT * FROM subscriptions")
-        if subs_df.empty: st.info("Keine Abos vorhanden. Füge welche über die Sidebar hinzu.")
-        else:
-            subs_df['start_date'] = pd.to_datetime(subs_df['start_date'])
-            def calc_monthly_cost(row):
-                amt = row['amount']
-                if row['cycle'] == "Jährlich": return amt / 12
-                if row['cycle'] == "Vierteljährlich": return amt / 3
-                if row['cycle'] == "Halbjährlich": return amt / 6
-                return amt
-            subs_df['Monatlich'] = subs_df.apply(calc_monthly_cost, axis=1)
-            c1, c2 = st.columns(2)
-            c1.metric("Monatliche Belastung (Ø)", format_euro(subs_df['Monatlich'].sum()))
-            c2.metric("Jährliche Gesamtkosten", format_euro(subs_df['Monatlich'].sum() * 12))
-            
-            sub_cfg = {
-                "id": st.column_config.NumberColumn(disabled=True), 
-                "name": st.column_config.TextColumn("Anbieter"), 
-                "amount": st.column_config.NumberColumn("Kosten (€)", format="%.2f €"), 
-                "cycle": st.column_config.SelectboxColumn("Turnus", options=CYCLE_OPTIONS), 
-                "category": st.column_config.SelectboxColumn("Kategorie", options=[""]+current_categories), 
-                "start_date": st.column_config.DateColumn("Startdatum"), 
-                "notice_period": st.column_config.TextColumn("Kündigungsfrist"), 
-                "Monatlich": st.column_config.NumberColumn("Ø Monat", format="%.2f €", disabled=True)
-            }
-            edited_subs = st.data_editor(subs_df, key="sub_editor", hide_index=True, use_container_width=True, column_config=sub_cfg, column_order=["name", "amount", "cycle", "Monatlich", "category", "start_date", "notice_period"], num_rows="dynamic")
-            
-            if st.session_state["sub_editor"]:
-                chg = st.session_state["sub_editor"]
-                for i in chg["deleted_rows"]: execute_db("DELETE FROM subscriptions WHERE id=?", (int(subs_df.iloc[i]['id']),))
-                for i, v in chg["edited_rows"].items():
-                    sid = subs_df.iloc[i]['id']
-                    for k, val in v.items():
-                        # FIX DATE
-                        if k == 'start_date':
-                            if pd.isnull(val): val = None
-                            elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
-                        execute_db(f"UPDATE subscriptions SET {k}=? WHERE id=?", (val, int(sid)))
-                if chg["added_rows"]:
-                    for row in chg["added_rows"]:
-                        execute_db("INSERT INTO subscriptions (name, amount, cycle, category, start_date, notice_period) VALUES (?,?,?,?,?,?)", (row.get("name","Neu"), row.get("amount",0), row.get("cycle","Monatlich"), row.get("category","Fixkosten"), row.get("start_date",date.today()), row.get("notice_period","")))
-                if chg["deleted_rows"] or chg["edited_rows"] or chg["added_rows"]: st.rerun()
-
     # 5. KREDITE
     with tab_loans:
         st.subheader("📉 Kredit Übersicht")
         loans_df = get_data("SELECT * FROM loans")
-        
         if loans_df.empty:
             st.info("Keine Kredite angelegt. Nutze die Sidebar.")
         else:
             loans_df['start_date'] = pd.to_datetime(loans_df['start_date'])
-            
             def calc_loan(row):
                 total_liability = row['total_amount'] + row.get('interest_amount', 0.0)
                 today = date.today()
@@ -645,11 +573,10 @@ else:
                 
                 paid_so_far = months_passed * row['monthly_payment']
                 if paid_so_far > total_liability: paid_so_far = total_liability
-                
                 remaining = total_liability - paid_so_far
                 progress = paid_so_far / total_liability if total_liability > 0 else 0
                 end_date = row['start_date'] + relativedelta(months=row['term_months'])
-                status = "✅ Bezahlt" if remaining <= 0 else f"{int(row['term_months'] - months_passed)} Raten offen"
+                status = "✅ Bezahlt" if remaining <= 0 else f"{int(row['term_months'] - months_passed)} Raten"
                 return status, progress, remaining, end_date, total_liability
 
             res = loans_df.apply(calc_loan, axis=1, result_type='expand')
@@ -701,72 +628,26 @@ else:
                         execute_db("INSERT INTO loans (name, start_date, total_amount, interest_amount, term_months, monthly_payment) VALUES (?,?,?,?,?,?)", (row.get("name","Neu"), row.get("start_date",date.today()), row.get("total_amount",0), row.get("interest_amount",0), row.get("term_months",12), row.get("monthly_payment",0)))
                 if chg["deleted_rows"] or chg["edited_rows"] or chg["added_rows"]: st.rerun()
 
-    # 6. PROGNOSE (NEU ERWEITERT)
+    # 6. PROGNOSE (NEU: EXCEL-STYLE)
     with tab_forecast:
-        st.subheader("🔮 Prognose & Schuldenfrei-Planer")
+        st.subheader("🔮 Prognose & Fixkosten-Management")
         
-        # Eingabe Startsaldo und Simulation
-        col_inp, col_sim = st.columns([1,1])
-        with col_inp:
-            if "forecast_start" not in st.session_state: st.session_state.forecast_start = 1000.0
-            start_saldo = st.number_input("Aktueller Kontostand", value=st.session_state.forecast_start, step=50.0, format="%.2f")
-            st.session_state.forecast_start = start_saldo
-
-        # Daten sammeln
+        # 1. VISUAL (CHART)
+        # ----------------------------------------
         today = date.today()
-        # Einnahmen
+        # Einnahmen holen
         inc_df = get_data("SELECT * FROM incomes")
         total_income = inc_df['amount'].sum() if not inc_df.empty else 0.0
         
-        # Fixkosten (Abos + Kredite)
-        sub_monthly_sum = 0.0
-        if not s_df.empty: sub_monthly_sum = s_df.apply(get_m_cost, axis=1).sum()
+        # Startsaldo Input
+        col_inp, col_kpi = st.columns([1,3])
+        with col_inp:
+            if "forecast_start" not in st.session_state: st.session_state.forecast_start = 1000.0
+            start_saldo = st.number_input("Kontostand Heute", value=st.session_state.forecast_start, step=50.0, format="%.2f")
+            st.session_state.forecast_start = start_saldo
         
-        loan_monthly_sum = 0.0
-        if not l_df.empty:
-            l_df['start_date'] = pd.to_datetime(l_df['start_date'])
-            # Aktuelle Kredite - FIX: .date() conversion
-            act_l = l_df[l_df.apply(lambda r: today <= (r['start_date'] + relativedelta(months=r['term_months'])).date(), axis=1)]
-            loan_monthly_sum = act_l['monthly_payment'].sum()
-            
-        total_fixed = sub_monthly_sum + loan_monthly_sum
-        
-        # Variable Budgets (Standard)
-        var_budget_sum = cat_df[cat_df['is_fixed'] == 0]['default_budget'].sum()
-        
-        # Berechneter Überschuss
-        calc_surplus = total_income - total_fixed - var_budget_sum
-        
-        with col_sim:
-            st.markdown("#### Langzeit-Simulation")
-            st.caption("Wie schnell kommst du ins Plus?")
-            
-            # User kann Rate anpassen
-            repay_rate = st.number_input("Monatlicher Abtrag / Sparrate", value=float(max(0, calc_surplus)), step=10.0, format="%.2f", help="Standard = Einnahmen - (Fixkosten + Budgets)")
-            
-            if start_saldo >= 0:
-                st.success("✅ Du bist bereits im Plus!")
-            elif repay_rate <= 0:
-                st.error("⚠️ Dein monatlicher Überschuss ist ≤ 0.")
-            else:
-                months_needed = abs(start_saldo) / repay_rate
-                date_free = today + relativedelta(months=int(months_needed))
-                st.success(f"🎉 Schuldenfrei in **{months_needed:.1f} Monaten** ({date_free.strftime('%B %Y')})")
-                
-                # Chart Projection
-                dates = [today + relativedelta(months=i) for i in range(int(months_needed)+2)]
-                values = [start_saldo + (repay_rate * i) for i in range(len(dates))]
-                fig_proj = px.line(x=dates, y=values, title="Weg zur Null")
-                fig_proj.add_hline(y=0, line_dash="dash", line_color="green")
-                st.plotly_chart(fig_proj, use_container_width=True)
-
-        st.divider()
-        st.markdown("#### Liquidität diesen Monat")
-        # Kalender Events Logik für den laufenden Monat
-        _, last_day = calendar.monthrange(today.year, today.month)
+        # Events berechnen (für Chart)
         events = []
-        
-        # A. Einnahmen
         if not inc_df.empty:
             for _, r in inc_df.iterrows():
                 try:
@@ -774,17 +655,25 @@ else:
                     if evt_date >= today: events.append({"Datum": evt_date, "Text": f"💰 {r['name']}", "Betrag": r['amount']})
                 except: pass
         
-        # B. Abos (Vereinfacht: Zeige alle Monatlichen an ihrem Tag)
-        if not s_df.empty:
-            for _, r in s_df.iterrows():
-                try: # Nur Monatliche oder passende Jährliche
-                    if r['cycle'] == 'Monatlich' or (r['cycle'] == 'Jährlich' and r['start_date'].month == today.month):
+        # Fixkosten aus Subscriptions (inkl. Miete, Abos...)
+        subs = get_data("SELECT * FROM subscriptions")
+        if not subs.empty:
+            subs['start_date'] = pd.to_datetime(subs['start_date'])
+            for _, r in subs.iterrows():
+                try: 
+                    # Zyklus-Check vereinfacht
+                    include = False
+                    if r['cycle'] == 'Monatlich': include = True
+                    elif r['cycle'] == 'Jährlich' and r['start_date'].month == today.month: include = True
+                    elif r['cycle'] == 'Vierteljährlich' and (today.month - r['start_date'].month) % 3 == 0: include = True
+                    
+                    if include:
                          d_day = r['start_date'].day
                          evt_date = date(today.year, today.month, d_day)
-                         if evt_date >= today: events.append({"Datum": evt_date, "Text": f"🔄 {r['name']}", "Betrag": -r['amount']})
+                         if evt_date >= today: events.append({"Datum": evt_date, "Text": f"📉 {r['name']}", "Betrag": -r['amount']})
                 except: pass
 
-        # C. Kredite
+        # Kredite
         if not l_df.empty:
              for _, r in active_loans.iterrows():
                  try:
@@ -795,22 +684,94 @@ else:
 
         events.sort(key=lambda x: x['Datum'])
         
-        if events:
-            run_bal = start_saldo
-            chart_d = [{"Datum": today, "Saldo": start_saldo, "Info": "Start"}]
-            table_d = []
-            for e in events:
-                run_bal += e['Betrag']
-                chart_d.append({"Datum": e['Datum'], "Saldo": run_bal, "Info": e['Text']})
-                table_d.append(e)
+        # Chart bauen
+        run_bal = start_saldo
+        chart_d = [{"Datum": today, "Saldo": start_saldo, "Info": "Start"}]
+        for e in events:
+            run_bal += e['Betrag']
+            chart_d.append({"Datum": e['Datum'], "Saldo": run_bal, "Info": e['Text']})
+        
+        fig = px.line(pd.DataFrame(chart_d), x="Datum", y="Saldo", markers=True, title=f"Verlauf {DE_MONTHS[today.month]}")
+        fig.add_hrect(y0=-100000, y1=0, line_width=0, fillcolor="red", opacity=0.1)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 2. INPUT LISTEN (EXCEL STYLE)
+        # ----------------------------------------
+        st.divider()
+        st.markdown("#### 📝 Verwaltung: Einnahmen & Fixkosten")
+        
+        c_inc, c_fix = st.columns(2)
+        
+        # LISTE 1: EINNAHMEN
+        with c_inc:
+            st.caption("Einnahmen (Gehalt, Kindergeld...)")
+            # inc_df ist oben schon geladen
+            ed_inc = st.data_editor(
+                inc_df,
+                key="inc_editor",
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "id": None,
+                    "name": st.column_config.TextColumn("Name", required=True),
+                    "amount": st.column_config.NumberColumn("Betrag (€)", format="%.2f €", required=True),
+                    "day_of_month": st.column_config.NumberColumn("Tag", min_value=1, max_value=31, format="%d.")
+                }
+            )
+            # Save Logic Income
+            if st.session_state.get("inc_editor"):
+                ch = st.session_state["inc_editor"]
+                for i in ch["deleted_rows"]: execute_db("DELETE FROM incomes WHERE id=?", (int(inc_df.iloc[i]['id']),))
+                for i, v in ch["edited_rows"].items():
+                    rid = inc_df.iloc[i]['id']
+                    for k, val in v.items(): execute_db(f"UPDATE incomes SET {k}=? WHERE id=?", (val, int(rid)))
+                for r in ch["added_rows"]:
+                    execute_db("INSERT INTO incomes (name, amount, day_of_month) VALUES (?,?,?)", (r.get("name","Neu"), r.get("amount",0), r.get("day_of_month",1)))
+                if ch["deleted_rows"] or ch["edited_rows"] or ch["added_rows"]: st.rerun()
+
+        # LISTE 2: FIXKOSTEN (SUBSCRIPTIONS)
+        with c_fix:
+            st.caption("Fixkosten & Verträge (Miete, Strom, Netflix...)")
+            # subs (oben geladen) ist das DF
+            # Wir nutzen 'category' als 'Gruppe' (wie im Excel Screenshot)
             
-            f_df = pd.DataFrame(chart_d)
-            fig = px.line(f_df, x="Datum", y="Saldo", markers=True)
-            fig.add_hrect(y0=-100000, y1=0, line_width=0, fillcolor="red", opacity=0.1)
-            st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(pd.DataFrame(table_d), use_container_width=True)
-        else:
-            st.info("Keine weiteren fixen Buchungen diesen Monat erwartet.")
+            # Dropdown Optionen für Gruppe (Kategorie)
+            grp_opts = FIXED_COST_GROUPS
+            
+            ed_subs = st.data_editor(
+                subs,
+                key="fix_editor",
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "id": None,
+                    "name": st.column_config.TextColumn("Name (z.B. Miete)", required=True),
+                    "category": st.column_config.SelectboxColumn("Gruppe", options=grp_opts),
+                    "amount": st.column_config.NumberColumn("Betrag/Rate", format="%.2f €", required=True),
+                    "cycle": st.column_config.SelectboxColumn("Turnus", options=CYCLE_OPTIONS),
+                    "start_date": st.column_config.DateColumn("Abbuchung ab"),
+                    "notice_period": st.column_config.TextColumn("Kündigungsfrist")
+                },
+                column_order=["name", "category", "amount", "cycle", "start_date"]
+            )
+            
+            # Save Logic Fixkosten
+            if st.session_state.get("fix_editor"):
+                ch = st.session_state["fix_editor"]
+                for i in ch["deleted_rows"]: execute_db("DELETE FROM subscriptions WHERE id=?", (int(subs.iloc[i]['id']),))
+                for i, v in ch["edited_rows"].items():
+                    sid = subs.iloc[i]['id']
+                    for k, val in v.items():
+                        if k == 'start_date':
+                            if pd.isnull(val): val = None
+                            elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
+                        execute_db(f"UPDATE subscriptions SET {k}=? WHERE id=?", (val, int(sid)))
+                for r in ch["added_rows"]:
+                    execute_db("INSERT INTO subscriptions (name, category, amount, cycle, start_date) VALUES (?,?,?,?,?)", 
+                               (r.get("name","Neu"), r.get("category","Sonstiges"), r.get("amount",0), r.get("cycle","Monatlich"), date.today()))
+                if ch["deleted_rows"] or ch["edited_rows"] or ch["added_rows"]: st.rerun()
 
     # T6 Compare
     with tab_comp:
@@ -873,7 +834,6 @@ else:
             1. **⚙️ Verwaltung**: Erstelle deine Kategorien.
             2. **Fixkosten**: Haken bei "Ist Fixkosten", wenn es vom Konto abgeht (Miete).
             3. **Bargeldlos**: Haken bei "Variabel aber bargeldlos", wenn es ein variables Budget ist, das du aber meistens online zahlst (z.B. Drogerie Online). Das System sagt dir dann beim Verteilen, dass du dafür kein Bargeld abheben musst.
-            4. **Einnahmen**: Trage dein Gehalt und das Datum in der Verwaltung ein für die Prognose.
             """)
             
         with st.expander("2️⃣ Monatsanfang (Geld verteilen)"):
@@ -887,9 +847,4 @@ else:
             st.markdown("""
             1. **Ausgaben erfassen**: Wenn du einen Umschlag (z.B. Freizeit) online benutzt (z.B. Kinokarten online), setze den Haken **💳 Online**.
             2. **🏦 Bank (Back to Bank)**: Das System merkt, dass du Bargeld im Umschlag hast, das eigentlich weg ist. Es sagt dir: "Nimm X Euro aus dem Umschlag und zahl es ein".
-            """)
-
-        with st.expander("4️⃣ Prognose & Finanzguru-Feature"):
-            st.markdown("""
-            Der Reiter **🔮 Prognose** zeigt dir, wie viel Geld am Monatsende noch auf dem Konto ist, basierend auf deinen eingetragenen Fixkosten (Abos, Kredite) und Einnahmen.
             """)
