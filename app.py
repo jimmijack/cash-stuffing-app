@@ -7,43 +7,35 @@ from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
 import plotly.express as px
 
-# --- 1. KONFIGURATION & CSS (MOBILE OPTIMIERT) ---
-st.set_page_config(page_title="Cash Stuffing", layout="wide", page_icon="💶", initial_sidebar_state="collapsed")
+# --- 1. KONFIGURATION & CSS (Desktop Standard) ---
+st.set_page_config(page_title="Cash Stuffing Planer", layout="wide", page_icon="💶")
 
-# Custom CSS - Mobile Friendly
+# Custom CSS - Nur kosmetische Anpassungen für Boxen, kein Layout-Shift
 st.markdown("""
     <style>
-        /* Mobile Padding reduzieren */
-        .block-container {
-            padding-top: 1rem !important; 
-            padding-bottom: 3rem !important;
-            padding-left: 0.5rem !important;
-            padding-right: 0.5rem !important;
-        }
-        
-        /* Metrik-Boxen */
+        /* Metrik-Boxen stylen */
         div[data-testid="stMetric"] {
-            background-color: var(--secondary-background-color);
+            background-color: #f8f9fa;
             border: 1px solid rgba(128, 128, 128, 0.2);
-            padding: 8px;
+            padding: 10px;
             border-radius: 8px;
-            color: var(--text-color);
+            color: #31333F;
         }
-        
-        /* Navigation oben größer machen für Touch */
-        div[data-baseweb="segmented-control"] button {
-            font-size: 16px !important;
-            padding-top: 8px !important;
-            padding-bottom: 8px !important;
+        /* Darkmode Anpassung für Metriken */
+        @media (prefers-color-scheme: dark) {
+            div[data-testid="stMetric"] {
+                background-color: #262730;
+                color: #FAFAFA;
+            }
         }
-
-        /* Tabellen Header (Index verstecken) */
+        /* Tabellen Index verstecken */
         thead tr th:first-child {display:none}
         tbody th {display:none}
         
-        /* Buttons mobilfreundlicher */
-        button {
-            min-height: 45px !important;
+        /* Reiter etwas größer */
+        button[data-baseweb="tab"] {
+            font-size: 16px !important;
+            font-weight: 600 !important;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -83,7 +75,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, cycle TEXT, category TEXT, start_date TEXT, notice_period TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS denominations (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, total_amount REAL, c200 INTEGER DEFAULT 0, c100 INTEGER DEFAULT 0, c50 INTEGER DEFAULT 0, c20 INTEGER DEFAULT 0, c10 INTEGER DEFAULT 0, c5 INTEGER DEFAULT 0)''')
 
-    # Migrations
+    # Migrations (Sicherstellen, dass alle Spalten da sind)
     try: c.execute("SELECT default_budget FROM categories LIMIT 1")
     except: c.execute("ALTER TABLE categories ADD COLUMN default_budget REAL DEFAULT 0.0")
     try: c.execute("SELECT interest_amount FROM loans LIMIT 1")
@@ -130,7 +122,6 @@ def get_categories_full():
     cols = ['is_fixed', 'is_cashless', 'default_budget']
     for col in cols:
         if col not in df.columns: df[col] = 0
-        
     df['is_fixed'] = df['is_fixed'].fillna(0).astype(int)
     df['is_cashless'] = df['is_cashless'].fillna(0).astype(int)
     return df
@@ -138,447 +129,378 @@ def get_categories_full():
 try: init_db()
 except: pass
 
-# --- UI START ---
+# --- UI ---
 df = load_main_data()
 cat_df = get_categories_full()
 current_categories = cat_df['name'].tolist() if not cat_df.empty else []
 
-# --- TOP NAVIGATION (MOBILE FRIENDLY) ---
-# Menüpunkte gekürzt für mobile Anzeige
-menu_options = ["📊 Übersicht", "📝 Neu", "💰 Verteiler", "🎯 Ziele", "📈 Kredit/Abo", "🏦 Bank", "⚙️ Daten"]
-selected_view = st.segmented_control("", menu_options, default="📊 Übersicht", label_visibility="collapsed")
+st.title("💶 Cash Stuffing Planer")
 
-# --- SIDEBAR (Nur noch Settings) ---
+# --- SIDEBAR: EINGABEN ---
 with st.sidebar:
-    st.header("Einstellungen")
-    
-    with st.expander("⚙️ Kategorien verwalten", expanded=False):
+    st.markdown("### 🧭 Menü")
+    # Klassisches Radio Button Menü oder Segmented Control in der Sidebar
+    sb_mode = st.radio("Aktion wählen", ["📝 Neuer Eintrag", "💰 Budget Verteiler", "💸 Umbuchung", "🏦 Back to Bank", "🧮 Scheinrechner"], label_visibility="collapsed")
+    st.divider()
+
+    # 1. NEU
+    if sb_mode == "📝 Neuer Eintrag":
+        st.subheader("Buchung erfassen")
+        with st.form("entry_form", clear_on_submit=True):
+            col_d, col_t = st.columns([1,1])
+            date_input = col_d.date_input("Datum", date.today(), format="DD.MM.YYYY")
+            type_input = col_t.selectbox("Typ", ["IST (Ausgabe)", "SOLL (Budget)"])
+            
+            budget_target = None
+            if "SOLL" in type_input:
+                today = date.today()
+                nm = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+                opt1, opt2 = f"{DE_MONTHS[today.month]} {today.year}", f"{DE_MONTHS[nm.month]} {nm.year}"
+                bm_sel = st.radio("Ziel-Monat", [opt1, opt2], horizontal=True)
+                budget_target = today.strftime("%Y-%m") if bm_sel == opt1 else nm.strftime("%Y-%m")
+            
+            if current_categories:
+                cat_input = st.selectbox("Kategorie", current_categories)
+                cat_row = cat_df[cat_df['name'] == cat_input].iloc[0]
+                is_fixed_cat = cat_row['is_fixed'] == 1
+                is_cashless_cat = cat_row['is_cashless'] == 1
+                
+                amt_input = st.number_input("Betrag (€)", min_value=0.0, format="%.2f")
+                desc_input = st.text_input("Beschreibung / Notiz")
+                
+                is_online = False
+                if "IST" in type_input:
+                    default_chk = True if (is_fixed_cat or is_cashless_cat) else False
+                    is_online = st.checkbox("💳 Online / Karte?", value=default_chk, help="Geld bleibt im Umschlag, muss zur Bank")
+                
+                if st.form_submit_button("Speichern", use_container_width=True):
+                    execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
+                               (date_input, cat_input, desc_input, amt_input, "SOLL" if "SOLL" in type_input else "IST", budget_target, 1 if is_online else 0))
+                    st.toast("✅ Gespeichert!")
+                    st.rerun()
+            else: st.error("Bitte erst Kategorien anlegen!")
+
+    # 2. VERTEILER (Zurück in Sidebar, ohne Stückelung für den Anfang um Platz zu sparen, oder kompakt)
+    elif sb_mode == "💰 Budget Verteiler":
+        st.subheader("Budget Verteiler")
+        bulk_date = st.date_input("Datum", date.today(), format="DD.MM.YYYY")
+        today = date.today()
+        nm = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+        opt1, opt2 = f"{DE_MONTHS[today.month]} {today.year}", f"{DE_MONTHS[nm.month]} {nm.year}"
+        bulk_target_sel = st.radio("Ziel", [opt1, opt2], horizontal=True)
+        bulk_month = today.strftime("%Y-%m") if bulk_target_sel == opt1 else nm.strftime("%Y-%m")
+
+        if "bulk_df" not in st.session_state or len(st.session_state.bulk_df) != len(cat_df):
+            temp = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].copy()
+            temp.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Betrag']
+            st.session_state.bulk_df = temp
+
+        st.caption("Standard-Budgets anpassen:")
+        edited = st.data_editor(
+            st.session_state.bulk_df,
+            column_config={
+                "Kategorie": st.column_config.TextColumn(disabled=True),
+                "Betrag": st.column_config.NumberColumn(format="%.2f", min_value=0),
+                "is_fixed": st.column_config.CheckboxColumn("Fix?", disabled=True, width="small"),
+                "is_cashless": st.column_config.CheckboxColumn("Karte?", disabled=True, width="small")
+            },
+            hide_index=True, use_container_width=True, height=400
+        )
+        
+        total = edited["Betrag"].sum()
+        fixed_sum = edited[edited['is_fixed']==1]['Betrag'].sum()
+        cashless_sum = edited[(edited['is_fixed']==0) & (edited['is_cashless']==1)]['Betrag'].sum()
+        cash_sum = total - fixed_sum - cashless_sum
+        
+        st.markdown(f"**Gesamt: {format_euro(total)}**")
+        st.caption(f"Bar abheben: {format_euro(cash_sum)}")
+        
+        if st.button("Budgets buchen", type="primary", use_container_width=True):
+            if total > 0:
+                c = 0
+                for _, row in edited.iterrows():
+                    if row["Betrag"] > 0:
+                        execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
+                                   (bulk_date, row["Kategorie"], "Verteiler", row["Betrag"], "SOLL", bulk_month, 0))
+                        c += 1
+                st.success(f"✅ {c} Budgets gebucht!")
+                st.session_state.bulk_df = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].rename(columns={'name':'Kategorie', 'default_budget':'Betrag'})
+                st.rerun()
+            else: st.warning("Summe ist 0.")
+
+    # 3. TRANSFER
+    elif sb_mode == "💸 Umbuchung":
+        st.subheader("Umbuchung")
+        with st.form("trf"):
+            t_date = st.date_input("Datum", date.today())
+            c_from = st.selectbox("Von (Quelle)", current_categories)
+            c_to = st.selectbox("Nach (Ziel)", current_categories, index=1 if len(current_categories)>1 else 0)
+            t_amt = st.number_input("Betrag", min_value=0.01, format="%.2f")
+            if st.form_submit_button("Buchen", use_container_width=True):
+                if c_from != c_to:
+                    d_s = t_date.strftime("%Y-%m")
+                    execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?,?,?,?,?,?)", (t_date, c_from, f"Zu {c_to}", -t_amt, "SOLL", d_s))
+                    execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?,?,?,?,?,?)", (t_date, c_to, f"Von {c_from}", t_amt, "SOLL", d_s))
+                    st.success("✅ Erledigt")
+                    st.rerun()
+                else: st.error("Identisch.")
+
+    # 4. BANK
+    elif sb_mode == "🏦 Back to Bank":
+        st.subheader("Back to Bank")
+        conn = get_db_connection()
+        # Nur Bargeld-Kategorien (Variable) zählen, die online ausgegeben wurden
+        q = """SELECT SUM(t.amount) FROM transactions t LEFT JOIN categories c ON t.category = c.name 
+               WHERE t.type='IST' AND t.is_online=1 AND (c.is_fixed=0 OR c.is_fixed IS NULL) AND (c.is_cashless=0 OR c.is_cashless IS NULL)"""
+        online = pd.read_sql_query(q, conn).iloc[0,0] or 0.0
+        dep = pd.read_sql_query("SELECT SUM(amount) FROM transactions WHERE type='BANK_DEPOSIT'", conn).iloc[0,0] or 0.0
+        conn.close()
+        bal = online - dep
+        st.metric("Im Umschlag", format_euro(bal))
+        if bal > 0:
+            with st.form("bf"):
+                d_amt = st.number_input("Betrag einzahlen", value=float(bal), max_value=float(bal), format="%.2f")
+                if st.form_submit_button("Einzahlen", use_container_width=True):
+                    execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?,?,?,?,?,?)", (date.today(), "Back to Bank", "Einzahlung", d_amt, "BANK_DEPOSIT", date.today().strftime("%Y-%m")))
+                    st.success("✅")
+                    st.rerun()
+        else: st.success("Leer.")
+        
+    # 5. TOOLS
+    elif sb_mode == "🧮 Scheinrechner":
+        st.subheader("Scheinrechner")
+        target_val = st.number_input("Betrag", min_value=0, value=500, step=50)
+        notes = [200, 100, 50, 20, 10, 5]
+        result = {}
+        remainder = target_val
+        for n in notes:
+            count = int(remainder // n)
+            if count > 0:
+                result[n] = count
+                remainder -= count * n
+        for n, c in result.items(): st.write(f"**{c}x** {n} €")
+
+    # --- SETTINGS ---
+    st.markdown("---")
+    with st.expander("⚙️ Verwaltung & Backup"):
+        
         st.caption("Neue Kategorie")
         with st.form("add_cat_form", clear_on_submit=True):
-            new_name = st.text_input("Name", placeholder="z.B. Urlaub")
-            new_prio = st.selectbox("Prio", PRIO_OPTIONS)
-            c_fix, c_cl = st.columns(2)
-            new_fix = c_fix.checkbox("Fixkosten?")
-            new_cl = c_cl.checkbox("Karte?")
+            c_n, c_p = st.columns([2,1])
+            new_name = c_n.text_input("Name", placeholder="Neue Kat.")
+            new_prio = c_p.selectbox("Prio", PRIO_OPTIONS)
+            c_fix, c_cashless = st.columns(2)
+            new_fix = c_fix.checkbox("Ist Fixkosten?")
+            new_cashless = c_cashless.checkbox("Bargeldlos?")
+            
             if st.form_submit_button("Hinzufügen"):
                 if new_name:
-                    add_category_to_db(new_name, new_prio, 1 if new_fix else 0, 1 if new_cl else 0)
+                    if add_category_to_db(new_name, new_prio, 1 if new_fix else 0, 1 if new_cashless else 0):
+                        st.success(f"OK")
+                        if "bulk_df" in st.session_state: del st.session_state.bulk_df
+                        st.rerun()
+                    else: st.error("Existiert bereits.")
+        
+        st.divider()
+        st.caption("Bearbeiten")
+        edit_cat = st.selectbox("Auswahl", current_categories)
+        if edit_cat:
+            row = cat_df[cat_df['name'] == edit_cat].iloc[0]
+            with st.form("edit_cat_form"):
+                try: p_idx = PRIO_OPTIONS.index(row['priority'])
+                except: p_idx = 3
+                ep = st.selectbox("Prio", PRIO_OPTIONS, index=p_idx)
+                
+                c_e_fix, c_e_cl = st.columns(2)
+                ef = c_e_fix.checkbox("Fixkosten?", value=(row['is_fixed']==1))
+                ecl = c_e_cl.checkbox("Bargeldlos?", value=(row['is_cashless']==1))
+                ed = st.number_input("Std. Budget", value=float(row.get('default_budget', 0.0)), step=10.0)
+                
+                c_save, c_del = st.columns(2)
+                saved = c_save.form_submit_button("Speichern")
+                deleted = c_del.form_submit_button("Löschen", type="primary")
+                
+                if saved:
+                    execute_db("UPDATE categories SET priority=?, is_fixed=?, is_cashless=?, default_budget=? WHERE name=?", (ep, 1 if ef else 0, 1 if ecl else 0, ed, edit_cat))
+                    if "bulk_df" in st.session_state: del st.session_state.bulk_df
+                    st.success("OK")
+                    st.rerun()
+                if deleted:
+                    delete_category_from_db(edit_cat)
                     if "bulk_df" in st.session_state: del st.session_state.bulk_df
                     st.rerun()
         
         st.divider()
-        edit_cat = st.selectbox("Bearbeiten", [""] + current_categories)
-        if edit_cat:
-            row = cat_df[cat_df['name'] == edit_cat].iloc[0]
-            with st.form("edit_cat_form"):
-                ep = st.selectbox("Prio", PRIO_OPTIONS, index=PRIO_OPTIONS.index(row['priority']) if row['priority'] in PRIO_OPTIONS else 3)
-                c_ef, c_ecl = st.columns(2)
-                ef = c_ef.checkbox("Fixkosten?", value=(row['is_fixed']==1))
-                ecl = c_ecl.checkbox("Karte?", value=(row['is_cashless']==1))
-                ed = st.number_input("Std. Budget", value=float(row.get('default_budget', 0.0)))
-                
-                c_s, c_d = st.columns(2)
-                if c_s.form_submit_button("Speichern"):
-                    execute_db("UPDATE categories SET priority=?, is_fixed=?, is_cashless=?, default_budget=? WHERE name=?", (ep, 1 if ef else 0, 1 if ecl else 0, ed, edit_cat))
-                    if "bulk_df" in st.session_state: del st.session_state.bulk_df
-                    st.rerun()
-                if c_d.form_submit_button("Löschen", type="primary"):
-                    delete_category_from_db(edit_cat)
-                    if "bulk_df" in st.session_state: del st.session_state.bulk_df
-                    st.rerun()
-
-    with st.expander("🚨 Reset / Backup"):
         if not df.empty:
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("Backup laden", csv, "budget.csv", "text/csv")
-        if st.checkbox("Reset freigeben"):
-            if st.button("Buchungen löschen", type="primary"):
-                execute_db("DELETE FROM transactions")
+            st.download_button("📥 Backup", csv, "budget_backup.csv", "text/csv")
+        
+        st.divider()
+        if st.checkbox("Reset freischalten"):
+            if st.button("🧹 Nur Buchungen löschen", type="primary"):
+                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM sqlite_sequence WHERE name='transactions'")
+                st.rerun()
+            if st.button("💥 Alles löschen", type="primary"):
+                execute_db("DELETE FROM transactions"); execute_db("DELETE FROM categories"); execute_db("DELETE FROM loans"); execute_db("DELETE FROM subscriptions"); execute_db("DELETE FROM sqlite_sequence")
                 st.rerun()
 
-# --- MAIN CONTENT ---
+# --- MAIN TABS ---
+if df.empty and not current_categories:
+    # 8 Tabs
+    t_dash, t_sf, t_ana, t_sub, t_loan, t_comp, t_dat, t_hlp = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "📖 Anleitung"])
+    st.info("Start: Lege in der Sidebar Kategorien an.")
+else:
+    # 8 Tabs: Dashboard, Sparziele, Analyse, Abos, Kredite, Vergleich, Daten, Anleitung
+    tab_dash, tab_sf, tab_ana, tab_subs, tab_loans, tab_comp, tab_data, tab_help = st.tabs(["📊 Übersicht", "🎯 Sparziele", "📈 Analyse", "🔄 Abos", "📉 Kredite", "⚖️ Vergleich", "📝 Daten", "📖 Hilfe"])
 
-if not current_categories:
-    st.info("Bitte öffne das Menü oben links (>) um Kategorien anzulegen.")
-
-# 1. DASHBOARD
-elif selected_view == "📊 Übersicht":
-    # FIXKOSTEN RADAR (Kompakt)
-    l_df = get_data("SELECT * FROM loans")
-    s_df = get_data("SELECT * FROM subscriptions")
-    
-    loan_m = 0.0
-    if not l_df.empty:
-        l_df['start_date'] = pd.to_datetime(l_df['start_date'])
-        now = datetime.datetime.now()
-        act_l = l_df[l_df.apply(lambda r: now <= (r['start_date'] + relativedelta(months=r['term_months'])), axis=1)]
-        loan_m = act_l['monthly_payment'].sum()
-
-    sub_m = 0.0
-    if not s_df.empty:
-        sub_m = s_df.apply(lambda r: r['amount']/12 if r['cycle']=="Jährlich" else (r['amount']/3 if r['cycle']=="Vierteljährlich" else (r['amount']/6 if r['cycle']=="Halbjährlich" else r['amount'])), axis=1).sum()
-
-    st.markdown(f"**Fixlast:** {format_euro(loan_m + sub_m)} (Abos: {format_euro(sub_m)} | Kredite: {format_euro(loan_m)})")
-    st.divider()
-
-    if df.empty: st.info("Keine Buchungen.")
-    else:
-        # Filter oben
-        col_m, col_f = st.columns([1,1])
-        m_opts = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
-        if not m_opts.empty:
-            sel_m = col_m.selectbox("Monat", m_opts['Analyse_Monat'].unique(), label_visibility="collapsed")
-            sel_c = col_f.multiselect("Kat.", current_categories, label_visibility="collapsed", placeholder="Filter")
-            
-            key = m_opts[m_opts['Analyse_Monat'] == sel_m]['sort_key_month'].iloc[0]
-            d_c = df[(df['sort_key_month'] == key) & (df['type'].isin(['SOLL','IST']))].copy()
-            d_p = df[(df['sort_key_month'] < key) & (df['type'].isin(['SOLL','IST']))].copy()
-            
-            # Calc
-            pg = d_p.groupby(['category','type'])['amount'].sum().unstack(fill_value=0)
-            if 'SOLL' not in pg: pg['SOLL']=0; 
-            if 'IST' not in pg: pg['IST']=0
-            
-            cg = d_c.groupby(['category','type'])['amount'].sum().unstack(fill_value=0)
-            if 'SOLL' not in cg: cg['SOLL']=0; 
-            if 'IST' not in cg: cg['IST']=0
-            
-            ov = pd.DataFrame({'Übertrag': pg['SOLL']-pg['IST'], 'Budget': cg['SOLL'], 'Ausgaben': cg['IST']}).fillna(0)
-            if sel_c: ov = ov[ov.index.isin(sel_c)]
-            
-            ov['Rest'] = (ov['Übertrag'] + ov['Budget']) - ov['Ausgaben']
-            ov['Quote'] = (ov['Ausgaben'] / (ov['Übertrag'] + ov['Budget'])).fillna(0)
-            
-            # Merge Metadata
-            ov = ov.merge(cat_df.set_index('name')[['priority','is_fixed','is_cashless']], left_index=True, right_index=True, how='left')
-            ov = ov.sort_values(by=['priority', 'Rest'], ascending=[True, False])
-            
-            # KPIs
-            sums = ov.sum(numeric_only=True)
-            k1, k2, k3 = st.columns(3)
-            k1.metric("Verfügbar", format_euro(sums['Übertrag']+sums['Budget']))
-            k2.metric("Ausgaben", format_euro(sums['Ausgaben']))
-            k3.metric("Rest", format_euro(sums['Rest']), delta_color="normal")
-            
-            # Tabelle Mobil Optimiert (Weniger Spalten)
-            cfg = {
-                "Quote": st.column_config.ProgressColumn(" %", format="%.0f%%", width="small"),
-                "Rest": st.column_config.NumberColumn("Rest", format="%.0f €", width="small"), # Ohne Cents für Platz
-                "Ausgaben": st.column_config.NumberColumn("Ist", format="%.0f", width="small"),
-                "Budget": st.column_config.NumberColumn("Neu", format="%.0f", width="small"),
-            }
-            st.dataframe(ov[['Rest', 'Quote', 'Ausgaben', 'Budget']], use_container_width=True, column_config=cfg)
-            
-            with st.expander("Buchungen"):
-                ts = d_c.copy()
-                if sel_c: ts = ts[ts['category'].isin(sel_c)]
-                ts['Art'] = ts['is_online'].apply(lambda x: "💳" if x==1 else "💵")
-                st.dataframe(ts[['date','category','amount','Art']].sort_values('date', ascending=False), hide_index=True, use_container_width=True, column_config={"date": st.column_config.DateColumn("Datum", format="DD.MM"), "amount": st.column_config.NumberColumn("€", format="%.2f")})
-
-# 2. NEU (EINGABE)
-elif selected_view == "📝 Neu":
-    st.subheader("Neuer Eintrag")
-    with st.form("entry_form", clear_on_submit=True):
-        c_d, c_t = st.columns([1,1])
-        date_input = c_d.date_input("Datum", date.today(), format="DD.MM.YYYY")
-        type_input = c_t.selectbox("Typ", ["IST (Ausgabe)", "SOLL (Budget)"], label_visibility="collapsed")
+    # 1. DASHBOARD
+    with tab_dash:
+        # FIXKOSTEN RADAR
+        st.markdown("##### 📌 Fixkosten (Monat)")
         
-        budget_target = None
-        if "SOLL" in type_input:
-            today = date.today()
-            nm = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
-            bm_sel = st.radio("Ziel", [f"{DE_MONTHS[today.month]}", f"{DE_MONTHS[nm.month]}"], horizontal=True)
-            budget_target = today.strftime("%Y-%m") if str(DE_MONTHS[today.month]) in bm_sel else nm.strftime("%Y-%m")
-        
-        cat_input = st.selectbox("Kategorie", current_categories)
-        
-        c_a, c_on = st.columns([2,1])
-        amt_input = c_a.number_input("Betrag (€)", min_value=0.0, format="%.2f")
-        
-        # Auto-Check Online
-        cat_row = cat_df[cat_df['name'] == cat_input].iloc[0]
-        def_online = True if (cat_row['is_fixed'] or cat_row['is_cashless']) else False
-        is_online = False
-        if "IST" in type_input:
-            is_online = c_on.checkbox("Karte?", value=def_online)
-            
-        desc_input = st.text_input("Notiz (Optional)")
-        
-        if st.form_submit_button("💾 Speichern", use_container_width=True, type="primary"):
-            execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
-                       (date_input, cat_input, desc_input, amt_input, "SOLL" if "SOLL" in type_input else "IST", budget_target, 1 if is_online else 0))
-            st.toast("Gespeichert!")
-            st.rerun()
+        l_df = get_data("SELECT * FROM loans")
+        loan_monthly = 0.0
+        if not l_df.empty:
+            l_df['start_date'] = pd.to_datetime(l_df['start_date'])
+            today = datetime.datetime.now()
+            def is_active(row):
+                end_date = row['start_date'] + relativedelta(months=row['term_months'])
+                return today <= end_date
+            active_loans = l_df[l_df.apply(is_active, axis=1)]
+            loan_monthly = active_loans['monthly_payment'].sum()
 
-# 3. VERTEILER
-elif selected_view == "💰 Verteiler":
-    st.subheader("Budget & Scheine")
-    
-    col_d, col_check = st.columns([1,1])
-    bulk_date = col_d.date_input("Datum", date.today(), format="DD.MM.YYYY")
-    
-    today = date.today()
-    nm = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
-    bulk_target_sel = st.radio("Ziel-Monat", [f"{DE_MONTHS[today.month]}", f"{DE_MONTHS[nm.month]}"], horizontal=True)
-    bulk_month = today.strftime("%Y-%m") if str(DE_MONTHS[today.month]) in bulk_target_sel else nm.strftime("%Y-%m")
-
-    if "bulk_df" not in st.session_state or len(st.session_state.bulk_df) != len(cat_df):
-        temp = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].copy()
-        temp.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Rest']
-        temp['50'] = 0; temp['20'] = 0; temp['10'] = 0; temp['5'] = 0; temp['Notiz'] = ""
-        st.session_state.bulk_df = temp
-
-    # Calc Sums live
-    calc_df = st.session_state.bulk_df.copy()
-    calc_df['Summe'] = (calc_df['50']*50) + (calc_df['20']*20) + (calc_df['10']*10) + (calc_df['5']*5) + calc_df['Rest']
-    
-    # Kompakte Spaltennamen für Mobile
-    edited = st.data_editor(
-        calc_df,
-        column_config={
-            "Kategorie": st.column_config.TextColumn(disabled=True),
-            "is_fixed": st.column_config.CheckboxColumn("Fix", disabled=True, width="small"),
-            "is_cashless": st.column_config.CheckboxColumn("Krt", disabled=True, width="small"), # Krt = Karte
-            "50": st.column_config.NumberColumn("50", min_value=0, step=1, width="small"),
-            "20": st.column_config.NumberColumn("20", min_value=0, step=1, width="small"),
-            "10": st.column_config.NumberColumn("10", min_value=0, step=1, width="small"),
-            "5": st.column_config.NumberColumn("5", min_value=0, step=1, width="small"),
-            "Rest": st.column_config.NumberColumn("Rest/Dig.", min_value=0.0, format="%.2f"),
-            "Summe": st.column_config.NumberColumn("∑", format="%.2f", disabled=True, width="small"),
-            "default_budget": None
-        },
-        column_order=["Kategorie", "50", "20", "10", "5", "Rest", "Summe", "Notiz"],
-        hide_index=True, use_container_width=True, height=500
-    )
-    
-    st.session_state.bulk_df = edited[['Kategorie', 'is_fixed', 'is_cashless', 'Rest', '50', '20', '10', '5', 'Notiz']]
-    
-    total = edited["Summe"].sum()
-    # Cash Total: Nur Scheine zählen
-    cash_total = (edited['50'].sum()*50) + (edited['20'].sum()*20) + (edited['10'].sum()*10) + (edited['5'].sum()*5)
-    
-    c1, c2 = st.columns(2)
-    c1.metric("Gesamt", format_euro(total))
-    c2.metric("Bar abheben", format_euro(cash_total))
-    
-    if st.button(f"Buchen ({format_euro(total)})", type="primary", use_container_width=True):
-        if total > 0:
-            c = 0
-            for _, row in edited.iterrows():
-                row_sum = (row['50']*50) + (row['20']*20) + (row['10']*10) + (row['5']*5) + row['Rest']
-                if row_sum > 0:
-                    desc = "Verteiler" + (f": {row['Notiz']}" if row['Notiz'] else "")
-                    execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month, is_online) VALUES (?,?,?,?,?,?,?)",
-                               (bulk_date, row["Kategorie"], desc, row_sum, "SOLL", bulk_month, 0))
-                    c += 1
-            if cash_total > 0:
-                execute_db("INSERT INTO denominations (date, total_amount, c200, c100, c50, c20, c10, c5) VALUES (?,?,?,0,0,?,?,?,?)",
-                           (bulk_date.strftime("%Y-%m-%d"), cash_total, 0, int(edited['50'].sum()), int(edited['20'].sum()), int(edited['10'].sum()), int(edited['5'].sum())))
-            
-            st.success(f"✅ {c} Budgets gebucht!")
-            # Reset
-            temp = cat_df[['name', 'is_fixed', 'is_cashless', 'default_budget']].copy()
-            temp.columns = ['Kategorie', 'is_fixed', 'is_cashless', 'Rest']
-            temp['50'] = 0; temp['20'] = 0; temp['10'] = 0; temp['5'] = 0; temp['Notiz'] = ""
-            st.session_state.bulk_df = temp
-            st.rerun()
-        else: st.warning("0 €")
-
-# 4. ZIELE
-elif selected_view == "🎯 Ziele":
-    st.subheader("Sparziele")
-    sfc = pd.Series(dtype=float)
-    if not df.empty:
-        sfc = df[df['type'].isin(['SOLL','IST'])].groupby('category')['amount'].apply(lambda x: x[df['type']=='SOLL'].sum() - x[df['type']=='IST'].sum())
-    
-    sfd = cat_df.set_index('name').copy()
-    sfd['Aktuell'] = sfc
-    sfd['Aktuell'] = sfd['Aktuell'].fillna(0.0)
-    sfd['due_date'] = pd.to_datetime(sfd['due_date'], errors='coerce')
-    
-    def cr(row):
-        t = row['target_amount']
-        if t <= 0: return 0.0, "-"
-        c = row['Aktuell']
-        if c >= t: return 0.0, "✅"
-        d = row['due_date']
-        if pd.isnull(d): return 0.0, "?"
-        now = datetime.datetime.now()
-        if d <= now: return (t-c), "❗"
-        dif = relativedelta(d, now)
-        m = dif.years*12 + dif.months
-        if m < 1: m = 1
-        return (t-c)/m, f"{m} M"
-
-    re = sfd.apply(cr, axis=1, result_type='expand')
-    sfd['Rate'] = re[0]
-    sfd['Info'] = re[1]
-    
-    total_rate = sfd[sfd['target_amount']>0]['Rate'].sum()
-    st.metric("Monatliche Sparrate gesamt", format_euro(total_rate))
-    
-    for p in PRIO_OPTIONS:
-        g = sfd[sfd['priority'] == p].reset_index()
-        if not g.empty:
-            st.caption(f"{p}")
-            ek = f"sf_{p}"
-            # Weniger Spalten für Mobile
-            col_cfg = {
-                "name": st.column_config.TextColumn("Topf", disabled=True),
-                "Aktuell": st.column_config.NumberColumn("Ist", format="%.0f €", disabled=True, width="small"),
-                "target_amount": st.column_config.NumberColumn("Ziel", format="%.0f €", required=True, width="small"),
-                "due_date": st.column_config.DateColumn("Bis", format="DD.MM.YY", width="small"),
-                "Rate": st.column_config.NumberColumn("Rate", format="%.0f €", disabled=True, width="small"),
-                "notes": st.column_config.TextColumn("Notiz")
-            }
-            ed = st.data_editor(g, key=ek, use_container_width=True, hide_index=True, column_order=["name","Aktuell","target_amount","due_date","Rate","notes"], column_config=col_cfg)
-            
-            if st.session_state[ek]["edited_rows"]:
-                for i, ch in st.session_state[ek]["edited_rows"].items():
-                    cn = g.iloc[i]['name']
-                    nt = ch.get("target_amount", g.iloc[i]['target_amount'])
-                    nd = ch.get("due_date", g.iloc[i]['due_date'])
-                    nn = ch.get("notes", g.iloc[i]['notes'])
-                    if pd.isnull(nd): nd = None
-                    elif isinstance(nd, (datetime.date, datetime.datetime, pd.Timestamp)): nd = nd.strftime("%Y-%m-%d")
-                    execute_db("UPDATE categories SET target_amount=?, due_date=?, notes=? WHERE name=?", (nt, nd, nn, cn))
-                st.rerun()
-
-# 5. KREDIT / ABO
-elif selected_view == "📈 Kredit/Abo":
-    t_sub, t_loan = st.tabs(["Abos", "Kredite"])
-    
-    with t_sub:
-        subs_df = get_data("SELECT * FROM subscriptions")
-        if not subs_df.empty:
-            subs_df['start_date'] = pd.to_datetime(subs_df['start_date'])
-            def cmc(r):
+        s_df = get_data("SELECT * FROM subscriptions")
+        sub_monthly = 0.0
+        if not s_df.empty:
+            def get_m_cost(r):
                 a = r['amount']
                 if r['cycle'] == "Jährlich": return a/12
-                if r['cycle'] == "Vierteljährlich": return a/3
                 if r['cycle'] == "Halbjährlich": return a/6
+                if r['cycle'] == "Vierteljährlich": return a/3
                 return a
-            subs_df['M'] = subs_df.apply(cmc, axis=1)
-            st.metric("Ø Monatlich", format_euro(subs_df['M'].sum()))
-            
-            sc = {"id": st.column_config.NumberColumn(disabled=True), "name": "Abo", "amount": st.column_config.NumberColumn("€", format="%.2f"), "cycle": st.column_config.SelectboxColumn("Turnus", options=CYCLE_OPTIONS), "start_date": st.column_config.DateColumn("Start"), "notice_period": "Frist"}
-            es = st.data_editor(subs_df, key="se", hide_index=True, use_container_width=True, column_config=sc, column_order=["name","amount","cycle","start_date"], num_rows="dynamic")
-            
-            if st.session_state["se"]:
-                ch = st.session_state["se"]
-                for i in ch["deleted_rows"]: execute_db("DELETE FROM subscriptions WHERE id=?", (int(subs_df.iloc[i]['id']),))
-                for i, v in ch["edited_rows"].items():
-                    sid = subs_df.iloc[i]['id']
-                    for k, val in v.items():
-                        if k == 'start_date' and isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
-                        execute_db(f"UPDATE subscriptions SET {k}=? WHERE id=?", (val, int(sid)))
-                for r in ch["added_rows"]:
-                    execute_db("INSERT INTO subscriptions (name, amount, cycle, category, start_date) VALUES (?,?,?,?,?)", (r.get("name","Neu"), r.get("amount",0), r.get("cycle","Monatlich"), "Fixkosten", date.today()))
-                if ch["deleted_rows"] or ch["edited_rows"] or ch["added_rows"]: st.rerun()
+            sub_monthly = s_df.apply(get_m_cost, axis=1).sum()
+
+        cf1, cf2, cf3 = st.columns(3)
+        cf1.metric("Ø Abos", format_euro(sub_monthly))
+        cf2.metric("Kredite", format_euro(loan_monthly))
+        cf3.metric("Fixlast Gesamt", format_euro(sub_monthly + loan_monthly), delta="Muss verdient werden", delta_color="off")
+        
+        st.divider()
+        
+        if df.empty: st.info("Keine Daten für Budget.")
         else:
-            st.info("Keine Abos. (Nutze Tabelle unten zum Hinzufügen)")
-            # Add Dummy for easy add
-            if st.button("Erstes Abo anlegen"):
-                execute_db("INSERT INTO subscriptions (name, amount, cycle) VALUES ('Neu', 0, 'Monatlich')")
-                st.rerun()
+            col_m, col_cat = st.columns([1, 3])
+            m_opts = df[['Analyse_Monat', 'sort_key_month']].drop_duplicates().sort_values('sort_key_month', ascending=False)
+            if not m_opts.empty:
+                sel_m = col_m.selectbox("Zeitraum", m_opts['Analyse_Monat'].unique(), label_visibility="collapsed")
+                sel_c = col_cat.multiselect("Filter", current_categories, default=current_categories, label_visibility="collapsed", placeholder="Alle Kategorien")
+                
+                key = m_opts[m_opts['Analyse_Monat'] == sel_m]['sort_key_month'].iloc[0]
+                d_c = df[(df['sort_key_month'] == key) & (df['type'].isin(['SOLL','IST']))].copy()
+                d_p = df[(df['sort_key_month'] < key) & (df['type'].isin(['SOLL','IST']))].copy()
+                
+                pg = d_p.groupby(['category','type'])['amount'].sum().unstack(fill_value=0)
+                if 'SOLL' not in pg: pg['SOLL']=0; 
+                if 'IST' not in pg: pg['IST']=0
+                co = pg['SOLL'] - pg['IST']
+                
+                cg = d_c.groupby(['category','type'])['amount'].sum().unstack(fill_value=0)
+                if 'SOLL' not in cg: cg['SOLL']=0; 
+                if 'IST' not in cg: cg['IST']=0
+                
+                ov = pd.DataFrame({'Übertrag': co, 'Budget': cg['SOLL'], 'Ausgaben': cg['IST']}).fillna(0)
+                if sel_c: ov = ov[ov.index.isin(sel_c)]
+                else: ov = ov[ov.index.isin([])]
+                
+                ov['Gesamt'] = ov['Übertrag'] + ov['Budget']
+                ov['Rest'] = ov['Gesamt'] - ov['Ausgaben']
+                ov['Quote'] = (ov['Ausgaben']/ov['Gesamt']).fillna(0)
+                
+                ov = ov.merge(cat_df.set_index('name')[['priority','is_fixed', 'is_cashless']], left_index=True, right_index=True, how='left')
+                ov['priority'] = ov['priority'].fillna('Standard')
+                
+                s = ov.sum(numeric_only=True)
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Verfügbar", format_euro(s['Gesamt']), delta=f"Übertrag: {format_euro(s['Übertrag'])}")
+                k2.metric("Ausgaben", format_euro(s['Ausgaben']), delta=f"{s['Quote']*100:.1f}%", delta_color="inverse")
+                k3.metric("Rest", format_euro(s['Rest']), delta_color="normal")
+                
+                # B2B Calculation for Dashboard
+                b2b = d_c[(d_c['is_online']==1) & (d_c['category'].isin(sel_c))].merge(cat_df, left_on='category', right_on='name')
+                b2b_s = b2b[(b2b['is_fixed']==0) & (b2b['is_cashless']==0)]['amount'].sum()
+                
+                if b2b_s > 0: k4.warning(f"Bank: {format_euro(b2b_s)}", icon="💳")
+                else: k4.success("Bank: 0 €", icon="✅")
+                
+                st.markdown("### 📋 Budget Übersicht")
+                ov = ov.sort_values(by=['priority', 'Rest'], ascending=[True, False])
+                cfg = {
+                    "Quote": st.column_config.ProgressColumn("Status", format="%.0f%%", min_value=0, max_value=1), 
+                    "Übertrag": st.column_config.NumberColumn(format="%.2f €"), 
+                    "Budget": st.column_config.NumberColumn(format="%.2f €"), 
+                    "Gesamt": st.column_config.NumberColumn(format="%.2f €"), 
+                    "Ausgaben": st.column_config.NumberColumn(format="%.2f €"), 
+                    "Rest": st.column_config.NumberColumn(format="%.2f €"), 
+                    "is_fixed": st.column_config.CheckboxColumn("Fix", width="small"),
+                    "is_cashless": st.column_config.CheckboxColumn("Karte", width="small")
+                }
+                st.dataframe(ov[['priority','is_fixed', 'is_cashless', 'Übertrag','Budget','Gesamt','Ausgaben','Rest','Quote']], use_container_width=True, column_config=cfg, height=500)
+                
+                with st.expander("🔎 Details"):
+                    ts = d_c[d_c['category'].isin(ov.index)].copy()
+                    ts['M'] = ts['is_online'].apply(lambda x: "💳" if x==1 else "💵")
+                    st.dataframe(ts[['date','category','description','amount','type','M']].sort_values(by='date', ascending=False), use_container_width=True, column_config={"amount": st.column_config.NumberColumn(format="%.2f €"), "date": st.column_config.DateColumn(format="DD.MM.YYYY")}, hide_index=True)
 
-    with t_loan:
-        loans_df = get_data("SELECT * FROM loans")
-        if not loans_df.empty:
-            loans_df['start_date'] = pd.to_datetime(loans_df['start_date'])
-            def cl(row):
-                tl = row['total_amount'] + row.get('interest_amount', 0.0)
-                today = date.today()
-                s = row['start_date'].date()
-                mp = (today.year - s.year) * 12 + (today.month - s.month) + 1 if today >= s else 0
-                if mp > row['term_months']: mp = row['term_months']
-                paid = mp * row['monthly_payment']
-                if paid > tl: paid = tl
-                rem = tl - paid
-                prog = paid / tl if tl > 0 else 0
-                return prog, rem
+    # 2. SINKING
+    with tab_sf:
+        st.subheader("🎯 Sparziele")
+        sfc = pd.Series(dtype=float)
+        if not df.empty:
+            sfc = df[df['type'].isin(['SOLL','IST'])].groupby('category')['amount'].apply(lambda x: x[df['type']=='SOLL'].sum() - x[df['type']=='IST'].sum())
+        
+        sfd = cat_df.set_index('name').copy()
+        sfd['Aktuell'] = sfc
+        sfd['Aktuell'] = sfd['Aktuell'].fillna(0.0)
+        sfd['due_date'] = pd.to_datetime(sfd['due_date'], errors='coerce')
+        
+        def cr(row):
+            t = row['target_amount']
+            if t <= 0: return 0.0, "-"
+            c = row['Aktuell']
+            if c >= t: return 0.0, "✅"
+            d = row['due_date']
+            if pd.isnull(d): return 0.0, "?"
+            now = datetime.datetime.now()
+            if d <= now: return (t-c), "❗"
+            dif = relativedelta(d, now)
+            m = dif.years*12 + dif.months
+            if m < 1: m = 1
+            return (t-c)/m, f"{m} M"
 
-            res = loans_df.apply(cl, axis=1, result_type='expand')
-            loans_df['Prog'] = res[0]; loans_df['Rest'] = res[1]
-            
-            st.metric("Restschuld", format_euro(loans_df['Rest'].sum()))
-            
-            lc = {"id": st.column_config.NumberColumn(disabled=True), "name": "Kredit", "total_amount": st.column_config.NumberColumn("Summe", format="%.0f €"), "monthly_payment": st.column_config.NumberColumn("Rate", format="%.0f €"), "Prog": st.column_config.ProgressColumn("%"), "Rest": st.column_config.NumberColumn("Rest", format="%.0f €", disabled=True)}
-            el = st.data_editor(loans_df, key="le", hide_index=True, use_container_width=True, column_config=lc, column_order=["name","monthly_payment","Rest","Prog"], num_rows="dynamic")
-            
-            if st.session_state["le"]:
-                ch = st.session_state["le"]
-                for i in ch["deleted_rows"]: execute_db("DELETE FROM loans WHERE id=?", (int(loans_df.iloc[i]['id']),))
-                for i, v in ch["edited_rows"].items():
-                    lid = loans_df.iloc[i]['id']
-                    for k, val in v.items():
-                        execute_db(f"UPDATE loans SET {k}=? WHERE id=?", (val, int(lid)))
-                for r in ch["added_rows"]:
-                    execute_db("INSERT INTO loans (name, start_date, total_amount, term_months, monthly_payment) VALUES (?,?,?,?,?)", (r.get("name","Neu"), date.today(), 0, 12, 0))
-                if ch["deleted_rows"] or ch["edited_rows"] or ch["added_rows"]: st.rerun()
-        else:
-            if st.button("Ersten Kredit anlegen"):
-                execute_db("INSERT INTO loans (name, start_date, total_amount, term_months, monthly_payment) VALUES ('Neu', ?, 0, 12, 0)", (date.today(),))
-                st.rerun()
-
-# 6. BANK
-elif selected_view == "🏦 Bank":
-    st.subheader("Back to Bank")
-    conn = get_db_connection()
-    # Nur Cashless-Transaktionen von NICHT-Cashless-Kategorien
-    q = """SELECT SUM(t.amount) FROM transactions t LEFT JOIN categories c ON t.category = c.name 
-           WHERE t.type='IST' AND t.is_online=1 AND (c.is_fixed=0 OR c.is_fixed IS NULL) AND (c.is_cashless=0 OR c.is_cashless IS NULL)"""
-    online = pd.read_sql_query(q, conn).iloc[0,0] or 0.0
-    dep = pd.read_sql_query("SELECT SUM(amount) FROM transactions WHERE type='BANK_DEPOSIT'", conn).iloc[0,0] or 0.0
-    conn.close()
-    bal = online - dep
-    
-    st.metric("Im Umschlag (muss zur Bank)", format_euro(bal))
-    
-    if bal > 0:
-        if st.button("Geld eingezahlt (Reset)", type="primary", use_container_width=True):
-            execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?,?,?,?,?,?)", (date.today(), "Back to Bank", "Einzahlung", bal, "BANK_DEPOSIT", date.today().strftime("%Y-%m")))
-            st.toast("Eingezahlt!")
-            st.rerun()
-    else:
-        st.success("Alles erledigt.")
-
-# 7. TRANSFER / DATA
-elif selected_view == "💸 Transfer":
-    st.subheader("Umbuchung")
-    with st.form("trf"):
-        c_from = st.selectbox("Von", current_categories)
-        c_to = st.selectbox("Nach", current_categories, index=1 if len(current_categories)>1 else 0)
-        t_amt = st.number_input("Betrag", min_value=0.01, format="%.2f")
-        if st.form_submit_button("Buchen", use_container_width=True):
-            if c_from != c_to:
-                d = date.today()
-                execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?,?,?,?,?,?)", (d, c_from, f"Zu {c_to}", -t_amt, "SOLL", d.strftime("%Y-%m")))
-                execute_db("INSERT INTO transactions (date, category, description, amount, type, budget_month) VALUES (?,?,?,?,?,?)", (d, c_to, f"Von {c_from}", t_amt, "SOLL", d.strftime("%Y-%m")))
-                st.success("Erledigt")
-            else: st.error("Identisch.")
-
-elif selected_view == "⚙️ Daten":
-    st.subheader("Alle Daten")
-    de = get_data("SELECT * FROM transactions ORDER BY date DESC, id DESC")
-    if not de.empty: de['date'] = pd.to_datetime(de['date'])
-    cf = {
-        "id": st.column_config.NumberColumn(disabled=True), 
-        "date": st.column_config.DateColumn("Datum", format="DD.MM.YY"), 
-        "category": st.column_config.SelectboxColumn("Kat.", options=current_categories), 
-        "type": st.column_config.SelectboxColumn("Typ", options=["IST", "SOLL", "BANK_DEPOSIT"]), 
-        "amount": st.column_config.NumberColumn("€", format="%.2f"), 
-        "is_online": st.column_config.CheckboxColumn("Web")
-    }
-    er = st.data_editor(de, hide_index=True, use_container_width=True, column_config=cf, key="me", num_rows="dynamic")
-    
-    if st.session_state["me"]:
-        ch = st.session_state["me"]
-        for i in ch["deleted_rows"]: execute_db("DELETE FROM transactions WHERE id=?", (int(de.iloc[i]['id']),))
-        for i, v in ch["edited_rows"].items():
-            rid = de.iloc[i]['id']
-            for k, val in v.items():
-                if k == 'date' and isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): val = val.strftime("%Y-%m-%d")
-                if k=='is_online': val=1 if val else 0
-                execute_db(f"UPDATE transactions SET {k}=? WHERE id=?", (val, int(rid)))
-        if ch["deleted_rows"] or ch["edited_rows"]: st.rerun()
+        re = sfd.apply(cr, axis=1, result_type='expand')
+        sfd['Rate'] = re[0]
+        sfd['Info'] = re[1]
+        sfd['Progress'] = (sfd['Aktuell']/sfd['target_amount']).fillna(0).clip(0,1)
+        
+        # Rate
+        total_monthly_need = sfd[sfd['target_amount'] > 0]['Rate'].sum()
+        prio_sums = sfd[sfd['target_amount'] > 0].groupby('priority')['Rate'].sum()
+        sum_a = prio_sums.get('A - Hoch', 0.0)
+        sum_b = prio_sums.get('B - Mittel', 0.0)
+        sum_c = prio_sums.get('C - Niedrig', 0.0)
+        
+        kc1, kc2, kc3, kc4 = st.columns(4)
+        kc1.metric("Gesamtrate / Monat", format_euro(total_monthly_need))
+        kc2.metric("Prio A", format_euro(sum_a))
+        kc3.metric("Prio B", format_euro(sum_b))
+        kc4.metric("Prio C", format_euro(sum_c))
+        st.divider()
+        
+        for p in PRIO_OPTIONS:
+            g = sfd[sfd['priority'] == p].reset_index()
+            if not g.empty:
+                st.markdown(f"**{p}**")
+                ek = f"sf_{p}"
+                col_cfg = {
+                    "name": st.column_config.TextColumn("Kategorie", disabled=True),
+                    "Aktuell": st.column_config.NumberColumn("Ist-Stand", format="%.2f €", disabled=True),
